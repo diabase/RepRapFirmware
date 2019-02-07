@@ -525,6 +525,75 @@ void GCodes::RunStateMachine(GCodeBuffer& gb, const StringRef& reply)
 		}
 		break;
 
+	case GCodeState::findCenterOfCavityMin:
+		if (LockMovementAndWaitForStandstill(gb))
+		{
+			// Save the current axis coordinates
+			SavePosition(findCenterOfCavityRestorePoint, gb);
+
+			// R parameter will move away to clear the trigger
+			if(gb.Seen('R'))
+			{
+				const float rVal = gb.GetFValue();
+				for (size_t axis = 0; axis < numVisibleAxes; ++axis)
+				{
+					if (gb.Seen(axisLetters[axis]))
+					{
+						for (size_t axisInner = 0; axisInner < numVisibleAxes; ++axisInner)
+						{
+							moveBuffer.coords[axisInner] = currentUserPosition[axisInner];
+						}
+						// Add R to the current position
+						moveBuffer.coords[axis] += rVal;
+
+						SetMoveBufferDefaults();
+						moveBuffer.feedRate = findCenterOfCavityRestorePoint.feedRate;
+						moveBuffer.canPauseAfter = false;
+						moveBuffer.hasExtrusion = false;
+
+						NewMoveAvailable(1);
+
+						break;
+					}
+				}
+			}
+			gb.SetState(GCodeState::findCenterOfCavityR);
+		}
+		break;
+
+	case GCodeState::findCenterOfCavityR:
+		if (LockMovementAndWaitForStandstill(gb))
+		{
+			FindCenterOfCavity(gb, reply, false);
+		}
+		break;
+
+	case GCodeState::findCenterOfCavityMax:
+		if (LockMovementAndWaitForStandstill(gb))
+		{
+			for (size_t axis = 0; axis < numVisibleAxes; ++axis)
+			{
+				if (gb.Seen(axisLetters[axis]))
+				{
+					for (size_t axisInner = 0; axisInner < numVisibleAxes; ++axisInner)
+					{
+						moveBuffer.coords[axisInner] = findCenterOfCavityRestorePoint.moveCoords[axisInner];
+					}
+					moveBuffer.coords[axis] += (currentUserPosition[axis] - findCenterOfCavityRestorePoint.moveCoords[axis]) / 2;
+
+					SetMoveBufferDefaults();
+					moveBuffer.feedRate = findCenterOfCavityRestorePoint.feedRate;
+					moveBuffer.hasExtrusion = false;
+
+					gb.SetState(GCodeState::waitingForSpecialMoveToComplete);
+					NewMoveAvailable(1);
+
+					break;
+				}
+			}
+		}
+		break;
+
 	case GCodeState::homing1:
 		if (toBeHomed == 0)
 		{
