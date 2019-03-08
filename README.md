@@ -1,3 +1,9 @@
+Reason for this fork
+---
+This fork only exists until all changes have been merged back into original dc42 fork of RepRapFirmware.
+
+Original README
+---
 This is firmware for controlling 3D printers and related devices using electronics based on ATSAM main processors.
 
 RepRapFirmware has pioneered a number of advances in 3D printing including:
