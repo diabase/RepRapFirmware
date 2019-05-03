@@ -956,7 +956,7 @@ GCodeResult GCodes::FindCenterOfCavity(GCodeBuffer& gb, const StringRef& reply, 
 			// Deal with feed rate
 			if (gb.Seen(feedrateLetter))
 			{
-				const float rate = gb.GetFValue() * distanceScale;
+				const float rate = gb.ConvertDistance(gb.GetFValue());
 				gb.MachineState().feedRate = rate * SecondsToMinutes;	// don't apply the speed factor to homing and other special moves
 			}
 			else
