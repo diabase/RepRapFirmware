@@ -41,7 +41,7 @@ void Filament::Unload()
 
 void Filament::LoadAssignment()
 {
-	FileStore *file = reprap.GetPlatform().OpenFile(SYS_DIR, FilamentAssignmentFile, OpenMode::read);
+	FileStore *file = reprap.GetPlatform().OpenSysFile(FilamentAssignmentFile, OpenMode::read);
 	if (file == nullptr)
 	{
 		// May happen, but not critical
@@ -78,7 +78,7 @@ void Filament::LoadAssignment()
 
 /*static*/ void Filament::SaveAssignments()
 {
-	FileStore *file = reprap.GetPlatform().OpenFile(SYS_DIR, FilamentAssignmentFile, OpenMode::write);
+	FileStore * const file = reprap.GetPlatform().OpenSysFile(FilamentAssignmentFile, OpenMode::write);
 	if (file == nullptr)
 	{
 		// Should never happen
@@ -95,7 +95,7 @@ void Filament::LoadAssignment()
 		time_t timeNow = reprap.GetPlatform().GetDateTime();
 		const struct tm * const timeInfo = gmtime(&timeNow);
 		buf.catf(" generated at %04u-%02u-%02u %02u:%02u",
-						timeInfo->tm_year + 1900, timeInfo->tm_mon, timeInfo->tm_mday, timeInfo->tm_hour, timeInfo->tm_min);
+						timeInfo->tm_year + 1900, timeInfo->tm_mon + 1, timeInfo->tm_mday, timeInfo->tm_hour, timeInfo->tm_min);
 	}
 	buf.cat('\n');
 	file->Write(buf.c_str());

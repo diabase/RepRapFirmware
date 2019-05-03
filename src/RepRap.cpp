@@ -139,11 +139,6 @@ extern "C" void hsmciIdle(uint32_t stBits, uint32_t dmaBits)
 		DuetExpansion::Spin(false);
 	}
 #endif
-
-	if (reprap.GetSpinningModule() != moduleFilamentSensors)
-	{
-		FilamentMonitor::Spin(false);
-	}
 }
 
 #endif
@@ -220,7 +215,7 @@ void RepRap::Init()
 	platform->Init();
 	network->Init();
 	SetName(DEFAULT_MACHINE_NAME);		// Network must be initialised before calling this because this calls SetHostName
-	gCodes->Init();
+	gCodes->Init();						// must be called before Move::Init
 #if SUPPORT_CAN_EXPANSION
 	CanInterface::Init();
 #endif
@@ -268,6 +263,7 @@ void RepRap::Init()
 
 	platform->MessageF(UsbMessage, "%s Version %s dated %s\n", FIRMWARE_NAME, VERSION, DATE);
 
+#if !defined(DUET3_V05)					// Duet 3 0.5 has no local SD card
 	// Try to mount the first SD card
 	{
 		GCodeResult rslt;
@@ -284,14 +280,14 @@ void RepRap::Init()
 			// Run the configuration file
 			const char *configFile = platform->GetConfigFile();
 			platform->Message(UsbMessage, "\nExecuting ");
-			if (platform->GetMassStorage()->FileExists(platform->GetSysDir(), configFile))
+			if (platform->SysFileExists(configFile))
 			{
-				platform->MessageF(UsbMessage, "%s...", platform->GetConfigFile());
+				platform->MessageF(UsbMessage, "%s...", configFile);
 			}
 			else
 			{
-				platform->MessageF(UsbMessage, "%s (no configuration file found)...", platform->GetDefaultFile());
 				configFile = platform->GetDefaultFile();
+				platform->MessageF(UsbMessage, "%s (no configuration file found)...", configFile);
 			}
 
 			if (gCodes->RunConfigFile(configFile))
@@ -310,10 +306,11 @@ void RepRap::Init()
 		}
 		else
 		{
-			delay(3000);		// Wait a few seconds so users have a chance to see this
+			delay(3000);			// Wait a few seconds so users have a chance to see this
 			platform->MessageF(UsbMessage, "%s\n", reply.c_str());
 		}
 	}
+#endif
 	processingConfig = false;
 
 	// Enable network (unless it's disabled)
@@ -324,10 +321,6 @@ void RepRap::Init()
 # ifdef RTOS
 	HSMCI->HSMCI_IDR = 0xFFFFFFFF;	// disable all HSMCI interrupts
 	NVIC_EnableIRQ(HSMCI_IRQn);
-#  if SAME70
-	XDMAC->XDMAC_CHID[CONF_HSMCI_XDMAC_CHANNEL].XDMAC_CID = 0xFFFFFFFF;	// disable all XDMAC interrupts from the HSMCI channel
-	NVIC_EnableIRQ(XDMAC_IRQn);
-#  endif
 # endif
 #endif
 	platform->MessageF(UsbMessage, "%s is up and running.\n", FIRMWARE_NAME);
@@ -424,7 +417,7 @@ void RepRap::Spin()
 
 	ticksInSpinState = 0;
 	spinningModule = moduleFilamentSensors;
-	FilamentMonitor::Spin(true);
+	FilamentMonitor::Spin();
 
 #if SUPPORT_12864_LCD
 	ticksInSpinState = 0;
@@ -591,9 +584,9 @@ void RepRap::SetDebug(Module m, bool enable)
 	PrintDebug();
 }
 
-void RepRap::SetDebug(bool enable)
+void RepRap::ClearDebug()
 {
-	debug = (enable) ? 0xFFFF : 0;
+	debug = 0;
 }
 
 void RepRap::PrintDebug()
@@ -873,7 +866,11 @@ OutputBuffer *RepRap::GetStatusResponse(uint8_t type, ResponseSource source)
 	// So we report 9999.9 instead.
 
 	// First the user coordinates
+#if SUPPORT_WORKPLACE_COORDINATES
+	response->catf("],\"system\":%u,\"xyz\":", gCodes->GetWorkplaceCoordinateSystemNumber());
+#else
 	response->cat("],\"xyz\":");
+#endif
 	const float * const userPos = gCodes->GetUserPosition();
 	ch = '[';
 	for (size_t axis = 0; axis < numVisibleAxes; axis++)
@@ -1020,7 +1017,7 @@ OutputBuffer *RepRap::GetStatusResponse(uint8_t type, ResponseSource source)
 			ch = ',';
 		}
 		response->cat((ch == '[') ? "[]" : "]");
-		response->catf(",\"babystep\":%.3f}", (double)gCodes->GetBabyStepOffset());
+		response->catf(",\"babystep\":%.3f}", (double)gCodes->GetTotalBabyStepOffset(Z_AXIS));
 	}
 
 	// G-code reply sequence for webserver (sequence number for AUX is handled later)
@@ -1080,8 +1077,8 @@ OutputBuffer *RepRap::GetStatusResponse(uint8_t type, ResponseSource source)
 		const int8_t bedHeater = (NumBedHeaters > 0) ? heat->GetBedHeater(0) : -1;
 		if (bedHeater != -1)
 		{
-			response->catf("\"bed\":{\"current\":%.1f,\"active\":%.1f,\"state\":%d,\"heater\":%d},",
-				(double)heat->GetTemperature(bedHeater), (double)heat->GetActiveTemperature(bedHeater),
+			response->catf("\"bed\":{\"current\":%.1f,\"active\":%.1f,\"standby\":%.1f,\"state\":%d,\"heater\":%d},",
+				(double)heat->GetTemperature(bedHeater), (double)heat->GetActiveTemperature(bedHeater), (double)heat->GetStandbyTemperature(bedHeater),
 					heat->GetStatus(bedHeater), bedHeater);
 		}
 
@@ -1736,7 +1733,7 @@ OutputBuffer *RepRap::GetLegacyStatusResponse(uint8_t type, int seq)
 	response->cat((ch == '[') ? "[]" : "]");
 
 	// Send the baby stepping offset
-	response->catf(",\"babystep\":%.03f", (double)(gCodes->GetBabyStepOffset()));
+	response->catf(",\"babystep\":%.03f", (double)(gCodes->GetTotalBabyStepOffset(Z_AXIS)));
 
 	// Send the current tool number
 	response->catf(",\"tool\":%d", GetCurrentToolNumber());
@@ -1806,7 +1803,9 @@ OutputBuffer *RepRap::GetLegacyStatusResponse(uint8_t type, int seq)
 	// Short messages are now pushed directly to PanelDue, so don't include them here as well
 	// We no longer send the amount of http buffer space here because the web interface doesn't use these forms of status response
 
-	// Deal with the message box, if there is one
+	// Deal with the message box.
+	// Don't send it if we are flashing firmware, because when we flash firmware we send messages directly to PanelDue and we don't want them to get cleared.
+	if (!gCodes->IsFlashing())
 	{
 		float timeLeft = 0.0;
 		MutexLocker lock(messageBoxMutex);
@@ -1853,11 +1852,11 @@ OutputBuffer *RepRap::GetLegacyStatusResponse(uint8_t type, int seq)
 		response->EncodeString(FIRMWARE_NAME, false);
 	}
 
+	// Send the response to the last command. Do this last because it can be long and may need to be truncated.
 	const int auxSeq = (int)platform->GetAuxSeq();
 	if (type < 2 || (seq != -1 && auxSeq != seq))
 	{
 
-		// Send the response to the last command. Do this last because it can be long and may need to be truncated.
 		response->catf(",\"seq\":%d,\"resp\":", auxSeq);					// send the response sequence number
 
 		// Send the JSON response
@@ -2032,85 +2031,82 @@ OutputBuffer *RepRap::GetFilelistResponse(const char *dir, unsigned int startAt)
 	return response;
 }
 
-// Get information for the specified file, or the currently printing file, in JSON format
+// Get information for the specified file, or the currently printing file (if 'filename' is null or empty), in JSON format
 bool RepRap::GetFileInfoResponse(const char *filename, OutputBuffer *&response, bool quitEarly)
 {
-	// Poll file info for a specific file
-	if (filename != nullptr && filename[0] != 0)
+	const bool specificFile = (filename != nullptr && filename[0] != 0);
+	GCodeFileInfo info;
+	if (specificFile)
 	{
-		GCodeFileInfo info;
-		if (!platform->GetMassStorage()->GetFileInfo(platform->GetGCodeDir(), filename, info, quitEarly))
+		// Poll file info for a specific file
+		String<MaxFilenameLength> filePath;
+		MassStorage::CombineName(filePath.GetRef(), platform->GetGCodeDir(), filename);
+		if (!platform->GetMassStorage()->GetFileInfo(filePath.c_str(), info, quitEarly))
 		{
 			// This may take a few runs...
 			return false;
 		}
+	}
+	else if (!printMonitor->GetPrintingFileInfo(info))
+	{
+		return false;
+	}
 
-		if (info.isValid)
+	if (!OutputBuffer::Allocate(response))
+	{
+		return false;
+	}
+
+	if (info.isValid)
+	{
+		response->printf("{\"err\":0,\"size\":%lu,",info.fileSize);
+		const struct tm * const timeInfo = gmtime(&info.lastModifiedTime);
+		if (timeInfo->tm_year > /*19*/80)
 		{
-			if (!OutputBuffer::Allocate(response))
-			{
-				// Should never happen
-				return false;
-			}
+			response->catf("\"lastModified\":\"%04u-%02u-%02uT%02u:%02u:%02u\",",
+					timeInfo->tm_year + 1900, timeInfo->tm_mon + 1, timeInfo->tm_mday,
+					timeInfo->tm_hour, timeInfo->tm_min, timeInfo->tm_sec);
+		}
 
-			response->printf("{\"err\":0,\"size\":%lu,",info.fileSize);
-			const struct tm * const timeInfo = gmtime(&info.lastModifiedTime);
-			if (timeInfo->tm_year > /*19*/80)
-			{
-				response->catf("\"lastModified\":\"%04u-%02u-%02uT%02u:%02u:%02u\",",
-						timeInfo->tm_year + 1900, timeInfo->tm_mon + 1, timeInfo->tm_mday,
-						timeInfo->tm_hour, timeInfo->tm_min, timeInfo->tm_sec);
-			}
+		response->catf("\"height\":%.2f,\"firstLayerHeight\":%.2f,\"layerHeight\":%.2f,",
+			(double)info.objectHeight, (double)info.firstLayerHeight, (double)info.layerHeight);
+		if (info.printTime != 0)
+		{
+			response->catf("\"printTime\":%" PRIu32 ",", info.printTime);
+		}
+		if (info.simulatedTime != 0)
+		{
+			response->catf("\"simulatedTime\":%" PRIu32 ",", info.simulatedTime);
+		}
 
-			response->catf("\"height\":%.2f,\"firstLayerHeight\":%.2f,\"layerHeight\":%.2f,",
-				(double)info.objectHeight, (double)info.firstLayerHeight, (double)info.layerHeight);
-			if (info.printTime != 0)
-			{
-				response->catf("\"printTime\":%" PRIu32 ",", info.printTime);
-			}
-			if (info.simulatedTime != 0)
-			{
-				response->catf("\"simulatedTime\":%" PRIu32 ",", info.simulatedTime);
-			}
-			response->cat("\"filament\":");
-			char ch = '[';
-			if (info.numFilaments == 0)
-			{
-				response->cat(ch);
-			}
-			else
-			{
-				for (size_t i = 0; i < info.numFilaments; ++i)
-				{
-					response->catf("%c%.1f", ch, (double)info.filamentNeeded[i]);
-					ch = ',';
-				}
-			}
-			response->cat("],\"generatedBy\":");
-			response->EncodeString(info.generatedBy, false);
-			response->cat('}');
+		response->cat("\"filament\":");
+		char ch = '[';
+		if (info.numFilaments == 0)
+		{
+			response->cat(ch);
 		}
 		else
 		{
-			if (!OutputBuffer::Allocate(response))
+			for (size_t i = 0; i < info.numFilaments; ++i)
 			{
-				return false;
+				response->catf("%c%.1f", ch, (double)info.filamentNeeded[i]);
+				ch = ',';
 			}
-
-			response->copy("{\"err\":1}");
 		}
-	}
-	else if (GetPrintMonitor().IsPrinting())
-	{
-		return GetPrintMonitor().GetPrintingFileInfoResponse(response);
+		response->cat("]");
+
+		if (!specificFile)
+		{
+			response->catf(",\"printDuration\":%d,\"fileName\":", (int)printMonitor->GetPrintDuration());
+			response->EncodeString(printMonitor->GetPrintingFilename(), false);
+		}
+
+		response->cat(",\"generatedBy\":");
+		response->EncodeString(info.generatedBy, false);
+		response->cat('}');
 	}
 	else
 	{
-		if (!OutputBuffer::Allocate(response))
-		{
-			return false;
-		}
-
 		response->copy("{\"err\":1}");
 	}
 	return true;

@@ -21,16 +21,16 @@ namespace StepTimer
 
 	// Function GetInterruptClocksInterruptsDisabled() is quite long for SAM4S and SAME70 processors, so it is moved to StepTimer.cpp and no longer inlined
 	// On other processors we have had trouble with the compiler moving instructions around too much when it is inlined, so we don't inline it any more.
-	uint32_t GetInterruptClocksInterruptsDisabled() __attribute__ ((hot));	// Get the interrupt clock count, when we know already that interrupts are disabled
+	uint32_t GetInterruptClocksInterruptsDisabled() __attribute__ ((hot));	// Get the interrupt clock count, when we know already that interrupts are disabled or base priority >= step interrupt priority
 
 #if SAM4S || SAME70		// if the TCs are 16-bit
 
 	// Get the interrupt clock count
 	static inline uint32_t GetInterruptClocks()
 	{
-		const irqflags_t flags = cpu_irq_save();						// ensure interrupts are disabled
+		const uint32_t baseprio = ChangeBasePriority(NvicPriorityStep);	// ensure step interrupts are disabled
 		const uint32_t rslt = GetInterruptClocksInterruptsDisabled();
-		cpu_irq_restore(flags);											// restore interrupt enable state
+		RestoreBasePriority(baseprio);									// restore interrupt enable state
 		return rslt;
 	}
 
@@ -47,7 +47,11 @@ namespace StepTimer
 	// Get the interrupt clock count when we only care about the lowest 16 bits. More efficient than calling GetInterruptClocks on platforms with 16-bit timers.
 	static inline uint16_t GetInterruptClocks16()
 	{
-		return (uint16_t)STEP_TC->TC_CHANNEL[STEP_TC_CHAN].TC_CV;
+#if __LPC17xx__
+        return (uint16_t)STEP_TC->TC;
+#else
+        return (uint16_t)STEP_TC->TC_CHANNEL[STEP_TC_CHAN].TC_CV;
+#endif
 	}
 
 	bool ScheduleStepInterrupt(uint32_t tim) __attribute__ ((hot));		// Schedule an interrupt at the specified clock count, or return true if it has passed already

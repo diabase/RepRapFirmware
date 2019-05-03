@@ -31,6 +31,7 @@ PrintMonitor::PrintMonitor(Platform& p, GCodes& gc) : platform(p), gCodes(gc), i
 	lastLayerFilament(0.0), lastLayerZ(0.0), numLayerSamples(0), layerEstimatedTimeLeft(0.0), printingFileParsed(false)
 {
 	filenameBeingPrinted[0] = 0;
+	printingFileInfo.Init();
 }
 
 void PrintMonitor::Init()
@@ -38,37 +39,20 @@ void PrintMonitor::Init()
 	lastUpdateTime = millis();
 }
 
-// Get information for the specified file, or the currently printing file, in JSON format
-bool PrintMonitor::GetPrintingFileInfoResponse(OutputBuffer *&response) const
+bool PrintMonitor::GetPrintingFileInfo(GCodeFileInfo& info)
 {
-	// If the file being printed hasn't been processed yet or if we cannot write the response, try again later
-	if (!printingFileParsed || !OutputBuffer::Allocate(response))
+	if (IsPrinting())
 	{
-		return false;
-	}
-
-	// Poll file info about a file currently being printed
-	response->printf("{\"err\":0,\"size\":%lu,\"height\":%.2f,\"firstLayerHeight\":%.2f,\"layerHeight\":%.2f,\"filament\":",
-					printingFileInfo.fileSize, (double)printingFileInfo.objectHeight, (double)printingFileInfo.firstLayerHeight, (double)printingFileInfo.layerHeight);
-	char ch = '[';
-	if (printingFileInfo.numFilaments == 0)
-	{
-		response->cat(ch);
+		if (!printingFileParsed)
+		{
+			return false;					// not ready yet
+		}
+		info = printingFileInfo;
 	}
 	else
 	{
-		for (size_t i = 0; i < printingFileInfo.numFilaments; ++i)
-		{
-			response->catf("%c%.1f", ch, (double)printingFileInfo.filamentNeeded[i]);
-			ch = ',';
-		}
+		info.isValid = false;
 	}
-	response->cat("],\"generatedBy\":");
-	response->EncodeString(printingFileInfo.generatedBy.c_str(), printingFileInfo.generatedBy.Capacity(), false);
-	response->catf(",\"printDuration\":%d,\"fileName\":", (int)GetPrintDuration());
-	response->EncodeString(filenameBeingPrinted.c_str(), filenameBeingPrinted.Capacity(), false);
-	response->cat('}');
-
 	return true;
 }
 
@@ -77,7 +61,7 @@ void PrintMonitor::Spin()
 	// File information about the file being printed must be available before layer estimations can be made
 	if (filenameBeingPrinted[0] != 0 && !printingFileParsed)
 	{
-		printingFileParsed = platform.GetMassStorage()->GetFileInfo(platform.GetGCodeDir(), filenameBeingPrinted.c_str(), printingFileInfo, false);
+		printingFileParsed = platform.GetMassStorage()->GetFileInfo(filenameBeingPrinted.c_str(), printingFileInfo, false);
 		if (!printingFileParsed)
 		{
 			return;
@@ -184,8 +168,8 @@ float PrintMonitor::GetWarmUpDuration() const
 // Notifies this class that a file has been set for printing
 void PrintMonitor::StartingPrint(const char* filename)
 {
-	printingFileParsed = platform.GetMassStorage()->GetFileInfo(platform.GetGCodeDir(), filename, printingFileInfo, false);
-	filenameBeingPrinted.copy(filename);
+	MassStorage::CombineName(filenameBeingPrinted.GetRef(), platform.GetGCodeDir(), filename);
+	printingFileParsed = platform.GetMassStorage()->GetFileInfo(filenameBeingPrinted.c_str(), printingFileInfo, false);
 }
 
 // Tell this class that the file set for printing is now actually processed

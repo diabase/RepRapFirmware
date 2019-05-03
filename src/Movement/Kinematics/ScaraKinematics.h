@@ -31,18 +31,20 @@ public:
 	bool CartesianToMotorSteps(const float machinePos[], const float stepsPerMm[], size_t numVisibleAxes, size_t numTotalAxes, int32_t motorPos[], bool isCoordinated) const override;
 	void MotorStepsToCartesian(const int32_t motorPos[], const float stepsPerMm[], size_t numVisibleAxes, size_t numTotalAxes, float machinePos[]) const override;
 	bool IsReachable(float x, float y, bool isCoordinated) const override;
-	bool LimitPosition(float position[], size_t numAxes, AxesBitmap axesHomed, bool isCoordinated) const override;
+	bool IntermediatePositionsReachable(const float initialCoords[], const float finalCoords[], float margin) const override;
+	bool LimitPosition(float finalCoords[], float * null initialCoords, size_t numAxes, AxesBitmap axesHomed, bool isCoordinated, bool applyM208Limits) const override;
 	void GetAssumedInitialPosition(size_t numAxes, float positions[]) const override;
 	size_t NumHomingButtons(size_t numVisibleAxes) const override;
 	const char* HomingButtonNames() const override { return "PDZUVWABC"; }
-	HomingMode GetHomingMode() const override { return homeIndividualMotors; }
+	HomingMode GetHomingMode() const override { return HomingMode::homeIndividualMotors; }
 	AxesBitmap AxesAssumedHomed(AxesBitmap g92Axes) const override;
 	AxesBitmap MustBeHomedAxes(AxesBitmap axesMoving, bool disallowMovesBeforeHoming) const override;
 	AxesBitmap GetHomingFileName(AxesBitmap toBeHomed, AxesBitmap alreadyHomed, size_t numVisibleAxes, const StringRef& filename) const override;
 	bool QueryTerminateHomingMove(size_t axis) const override;
 	void OnHomingSwitchTriggered(size_t axis, bool highEnd, const float stepsPerMm[], DDA& dda) const override;
-	void LimitSpeedAndAcceleration(DDA& dda, const float *normalisedDirectionVector) const override;
+	void LimitSpeedAndAcceleration(DDA& dda, const float *normalisedDirectionVector, size_t numVisibleAxes, bool continuousRotationShortcut) const override;
 	bool IsContinuousRotationAxis(size_t axis) const override;
+	AxesBitmap GetLinearAxes() const override;
 
 private:
 	static constexpr float DefaultSegmentsPerSecond = 100.0;
@@ -65,14 +67,15 @@ private:
 	float distalArmLength;
 	float thetaLimits[2];							// minimum proximal joint angle
 	float psiLimits[2];								// minimum distal joint angle
-	float crosstalk[3];								// proximal to distal, proximal to X and distal to Z crosstalk
+	float crosstalk[3];								// proximal to distal, proximal to Z and distal to Z crosstalk
 	float xOffset;									// where bed X=0 is relative to the proximal joint
 	float yOffset;									// where bed Y=0 is relative to the proximal joint
+	float requestedMinRadius;						// requested minimum radius
 	bool supportsContinuousRotation[2];				// true if the (proximal, distal) arms support continuous rotation
 
 	// Derived parameters
-	float minRadius, minRadiusSquared;
-	float maxRadius, maxRadiusSquared;
+	float minRadius;
+	float maxRadius;
 	float proximalArmLengthSquared;
 	float distalArmLengthSquared;
 	float twoPd;

@@ -42,6 +42,7 @@ const EndstopChecks ZProbeActive = 1 << 31;				// must be distinct from 1 << (an
 const EndstopChecks HomeAxes = 1 << 30;					// must be distinct from 1 << (any drive number)
 const EndstopChecks LogProbeChanges = 1 << 29;			// must be distinct from 1 << (any drive number)
 const EndstopChecks UseSpecialEndstop = 1 << 28;		// must be distinct from 1 << (any drive number)
+const EndstopChecks ActiveLowEndstop = 1 << 27;			// must be distinct from 1 << (any drive number)
 
 constexpr uint32_t ZProbeEndstopNumber = 1000;          // This is the special number to address the ZProbe as endstop
 
@@ -115,7 +116,11 @@ public:
 		float coords[MaxTotalDrivers];									// new positions for the axes, amount of movement for the extruders
 		float initialCoords[MaxAxes];									// the initial positions of the axes
 		float feedRate;													// feed rate of this move
-		float virtualExtruderPosition;									// the virtual extruder position at the start of this move
+		union
+		{
+			float virtualExtruderPosition;								// the virtual extruder position at the start of this move, for normal moves
+			float acceleration;											// the requested acceleration, for async moves
+		};
 		FilePosition filePos;											// offset in the file being printed at the start of reading this move
 		float proportionLeft;											// what proportion of the entire move remains after this segment
 		AxesBitmap xAxes;												// axes that X is mapped to
@@ -132,6 +137,8 @@ public:
 		uint8_t hasExtrusion : 1;										// true if the move includes extrusion - only valid if the move was set up by SetupMove
 		uint8_t isCoordinated : 1;										// true if this is a coordinates move
 		uint8_t usingStandardFeedrate : 1;								// true if this move uses the standard feed rate
+
+		void SetDefaults(size_t firstDriveToZero);						// set up default values
 	};
 
 	GCodes(Platform& p);
@@ -154,8 +161,7 @@ public:
 
 	bool GetAxisIsHomed(unsigned int axis) const						// Has the axis been homed?
 		{ return IsBitSet(axesHomed, axis); }
-	void SetAxisIsHomed(unsigned int axis)								// Tell us that the axis is now homed
-		{ SetBit(axesHomed, axis); }
+	void SetAxisIsHomed(unsigned int axis);								// Tell us that the axis is now homed
 	void SetAxisNotHomed(unsigned int axis)								// Tell us that the axis is not homed
 		{ ClearBit(axesHomed, axis); }
 	void SetAllAxesNotHomed()											// Flag all axes as not homed
@@ -170,8 +176,9 @@ public:
 
 	float GetRawExtruderTotalByDrive(size_t extruder) const;			// Get the total extrusion since start of print, for one drive
 	float GetTotalRawExtrusion() const { return rawExtruderTotal; }		// Get the total extrusion since start of print, all drives
-	float GetBabyStepOffset() const { return currentBabyStepZOffset; }	// Get the current baby stepping Z offset
-	const float *GetUserPosition() const { return currentUserPosition; }	// Return the current user position
+	float GetTotalBabyStepOffset(size_t axis) const
+		pre(axis < maxAxes);
+	const float *GetUserPosition() const { return currentUserPosition; } // Return the current user position
 
 #if HAS_NETWORKING
 	NetworkGCodeInput *GetHTTPInput() const { return httpInput; }
@@ -225,12 +232,16 @@ public:
 #endif
 
 	float GetMappedFanSpeed() const { return lastDefaultFanSpeed; }		// Get the mapped fan speed
-	void SetMappedFanSpeed(float f);									// Set the mapped fan speed
+	void SetMappedFanSpeed(float f);									// Set the speeds of fans mapped for the current tool
 	void HandleReply(GCodeBuffer& gb, GCodeResult rslt, const char *reply);	// Handle G-Code replies
 	void EmergencyStop();												// Cancel everything
 	bool GetLastPrintingHeight(float& height) const;					// Get the height in user coordinates of the last printing move
 
 	GCodeResult StartSDTiming(GCodeBuffer& gb, const StringRef& reply);	// Start timing SD card file writing
+
+#if SUPPORT_WORKPLACE_COORDINATES
+	unsigned int GetWorkplaceCoordinateSystemNumber() const { return currentCoordinateSystem + 1; }
+#endif
 
 protected:
 	DECLARE_OBJECT_MODEL
@@ -259,6 +270,8 @@ private:
 	bool LockMovementAndWaitForStandstill(const GCodeBuffer& gb);		// Lock movement and wait for pending moves to finish
 	void GrabResource(const GCodeBuffer& gb, Resource r);				// Grab a resource even if it is already owned
 	void GrabMovement(const GCodeBuffer& gb);							// Grab the movement lock even if it is already owned
+	void UnlockResource(const GCodeBuffer& gb, Resource r);				// Unlock the resource if we own it
+	void UnlockMovement(const GCodeBuffer& gb);							// Unlock the movement resource if we own it
 	void UnlockAll(const GCodeBuffer& gb);								// Release all locks
 
 	void StartNextGCode(GCodeBuffer& gb, const StringRef& reply);		// Fetch a new or old GCode and process it
@@ -333,7 +346,8 @@ private:
 
 	void SetMachinePosition(const float positionNow[MaxTotalDrivers], bool doBedCompensation = true); // Set the current position to be this
 	void UpdateCurrentUserPosition();											// Get the current position from the Move class
-	void ToolOffsetTransform(const float coordsIn[MaxAxes], float coordsOut[MaxAxes], AxesBitmap explicitAxes = 0);	// Convert user coordinates to head reference point coordinates
+	void ToolOffsetTransform(const float coordsIn[MaxAxes], float coordsOut[MaxAxes], AxesBitmap explicitAxes = 0, bool applyWorkplaceOffsets = true);
+																				// Convert user coordinates to head reference point coordinates
 	void ToolOffsetInverseTransform(const float coordsIn[MaxAxes], float coordsOut[MaxAxes]);	// Convert head reference point coordinates to user coordinates
 	const char *TranslateEndStopResult(EndStopHit es);							// Translate end stop result to text
 	GCodeResult RetractFilament(GCodeBuffer& gb, bool retract);					// Retract or un-retract filaments
@@ -353,7 +367,7 @@ private:
 	bool DoEmergencyPause();													// Do an emergency pause following loss of power or a motor stall
 #endif
 
-	void SetMappedFanSpeed();													// Set the speeds of fans mapped for the current tool
+	bool IsMappedFan(unsigned int fanNumber);									// Return true if this fan number is currently being used as a print cooling fan
 	void SaveFanSpeeds();														// Save the speeds of all fans
 
 	GCodeResult SetOrReportZProbe(GCodeBuffer& gb, const StringRef &reply);		// Handle M558
@@ -374,8 +388,6 @@ private:
 
 	void CopyConfigFinalValues(GCodeBuffer& gb);							// Copy the feed rate etc. from the daemon to the input channels
 
-	void ClearBabyStepping() { currentBabyStepZOffset = 0.0; }
-
 	MessageType GetMessageBoxDevice(GCodeBuffer& gb) const;					// Decide which device to display a message box on
 	void DoManualProbe(GCodeBuffer& gb);									// Do a manual bed probe
 
@@ -392,6 +404,7 @@ private:
 	void NewMoveAvailable();											// Flag that a new move is available
 
 	void SetMoveBufferDefaults();										// Set up default values in the move buffer
+	void ChangeExtrusionFactor(unsigned int extruder, float factor);	// Change a live extrusion factor
 
 #if SUPPORT_12864_LCD
 	int GetHeaterNumber(unsigned int itemNumber) const;
@@ -498,11 +511,10 @@ private:
 	float virtualExtruderPosition;				// Virtual extruder position of the last move fed into the Move class
 	float rawExtruderTotalByDrive[MaxExtruders]; // Extrusion amount in the last G1 command with an E parameter when in absolute extrusion mode
 	float rawExtruderTotal;						// Total extrusion amount fed to Move class since starting print, before applying extrusion factor, summed over all drives
-	float distanceScale;						// MM or inches
 
 #if SUPPORT_WORKPLACE_COORDINATES
 	static const size_t NumCoordinateSystems = 9;
-	unsigned int currentCoordinateSystem;
+	unsigned int currentCoordinateSystem;		// This is zero-based, where as the P parameter in the G10 command is 1-based
 	float workplaceCoordinates[NumCoordinateSystems][MaxAxes];	// Workplace coordinate offsets
 #else
 	float axisOffsets[MaxAxes];					// M206 axis offsets
@@ -524,7 +536,7 @@ private:
 	float speedFactor;							// speed factor as a percentage (normally 100.0)
 	float extrusionFactors[MaxExtruders];		// extrusion factors (normally 1.0)
 	float volumetricExtrusionFactors[MaxExtruders]; // Volumetric extrusion factors
-	float currentBabyStepZOffset;				// The accumulated Z offset due to baby stepping requests
+	float currentBabyStepOffsets[MaxAxes];		// The accumulated axis offsets due to baby stepping requests
 
 	// Z probe
 	GridDefinition defaultGrid;					// The grid defined by the M557 command in config.g
@@ -581,6 +593,7 @@ private:
 
 	// Laser
 	float laserMaxPower;
+	bool laserPowerSticky;						// true if G1 S parameters are remembered across G1 commands
 
 	// Heater fault handler
 	HeaterFaultState heaterFaultState;			// whether there is a heater fault and what we have done about it so far
@@ -623,7 +636,6 @@ private:
 	static constexpr const char* RESUME_AFTER_POWER_FAIL_G = "resurrect.g";
 	static constexpr const char* RESUME_PROLOGUE_G = "resurrect-prologue.g";
 	static constexpr const char* FILAMENT_CHANGE_G = "filament-change.g";
-	static constexpr const char* PEEL_MOVE_G = "peel-move.g";
 #if HAS_SMART_DRIVERS
 	static constexpr const char* REHOME_G = "rehome.g";
 #endif
@@ -649,6 +661,12 @@ inline void GCodes::NewMoveAvailable()
 	const unsigned int sl = totalSegments;
 	__DMB();					// make sure that the move details have been written first
 	segmentsLeft = sl;			// set the number of segments to indicate that a move is available to be taken
+}
+
+// Get the total baby stepping offset for an axis
+inline float GCodes::GetTotalBabyStepOffset(size_t axis) const
+{
+	return currentBabyStepOffsets[axis];
 }
 
 //*****************************************************************************************************

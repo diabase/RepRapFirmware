@@ -15,8 +15,10 @@
 # elif defined(__SAM4E8E__)
 #  define PLATFORM DuetNG
 # elif defined(__SAME70Q21__) || defined(__SAME70Q20B__) || defined(__SAME70Q21B__)
-#  if defined(DUET3)
-#   define PLATFORM Duet3
+#  if defined(DUET3_V03)
+#   define PLATFORM Duet3_V03
+#  elif defined(DUET3_V05)
+#   define PLATFORM Duet3_V05
 #  elif defined(SAME70XPLD)
 #   define PLATFORM SAME70xpld
 #  else
@@ -106,12 +108,28 @@
 # define HAS_W5500_NETWORKING	0
 #endif
 
-// Boards that support legacy SAM3X networking must define HAS_LEGACY_NETWORKING in their specific Pins_xxx.h file
+// Boards that support legacy SAM3X Lwip 1 networking must define HAS_LEGACY_NETWORKING in their specific Pins_xxx.h file
 #ifndef HAS_LEGACY_NETWORKING
 # define HAS_LEGACY_NETWORKING	0
 #endif
 
-#define HAS_NETWORKING			(HAS_LWIP_NETWORKING || HAS_WIFI_NETWORKING || HAS_W5500_NETWORKING || HAS_LEGACY_NETWORKING)
+#ifndef HAS_RTOSPLUSTCP_NETWORKING
+# define HAS_RTOSPLUSTCP_NETWORKING    0
+#endif
+
+#ifndef HAS_ESP32_NETWORKING
+# define HAS_ESP32_NETWORKING    0
+#endif
+
+#define HAS_NETWORKING			(HAS_LWIP_NETWORKING || HAS_WIFI_NETWORKING || HAS_W5500_NETWORKING || HAS_LEGACY_NETWORKING || HAS_RTOSPLUSTCP_NETWORKING || HAS_ESP32_NETWORKING)
+
+#ifndef SUPPORT_FTP
+# define SUPPORT_FTP			HAS_NETWORKING
+#endif
+
+#ifndef SUPPORT_TELNET
+# define SUPPORT_TELNET			HAS_NETWORKING
+#endif
 
 #if SUPPORT_DHT_SENSOR && !defined(RTOS)
 # error DHT sensor support requires RTOS

@@ -20,7 +20,7 @@
 #include "PrintMonitor.h"
 
 MenuItem::MenuItem(PixelNumber r, PixelNumber c, PixelNumber w, Alignment a, FontNumber fn, Visibility vis)
-	: row(r), column(c), width(w), align(a), fontNumber(fn), visCase(vis), itemChanged(true), highlighted(false), next(nullptr)
+	: row(r), column(c), width(w), height(0), align(a), fontNumber(fn), visCase(vis), itemChanged(true), highlighted(false), drawn(false), next(nullptr)
 {
 }
 
@@ -88,6 +88,16 @@ bool MenuItem::IsVisible() const
 	}
 }
 
+// Erase this item if it is drawn but should not be visible
+void MenuItem::EraseIfInvisible(Lcd7920& lcd, PixelNumber tOffset)
+{
+	if (drawn && !IsVisible())
+	{
+		lcd.Clear(row - tOffset, column, row + height, column + width);
+		drawn = false;
+	}
+}
+
 TextMenuItem::TextMenuItem(PixelNumber r, PixelNumber c, PixelNumber w, Alignment a, FontNumber fn, Visibility vis, const char* t)
 	: MenuItem(r, c, w, a, fn, vis), text(t)
 {
@@ -105,10 +115,11 @@ void TextMenuItem::Draw(Lcd7920& lcd, PixelNumber rightMargin, bool highlight, P
 	{
 		PrintAligned(lcd, tOffset, rightMargin);
 		itemChanged = false;
+		drawn = true;
 	}
 }
 
-void TextMenuItem::UpdateWidth(Lcd7920& lcd)
+void TextMenuItem::UpdateWidthAndHeight(Lcd7920& lcd)
 {
 	if (width == 0)
 	{
@@ -118,6 +129,11 @@ void TextMenuItem::UpdateWidth(Lcd7920& lcd)
 		lcd.TextInvert(false);
 		lcd.print(text);
 		width = lcd.GetColumn();
+	}
+	if (height == 0)
+	{
+		lcd.SetFont(fontNumber);
+		height = lcd.GetFontHeight();
 	}
 }
 
@@ -140,10 +156,11 @@ void ButtonMenuItem::Draw(Lcd7920& lcd, PixelNumber rightMargin, bool highlight,
 		highlighted = highlight;
 		PrintAligned(lcd, tOffset, rightMargin);
 		itemChanged = false;
+		drawn = true;
 	}
 }
 
-void ButtonMenuItem::UpdateWidth(Lcd7920& lcd)
+void ButtonMenuItem::UpdateWidthAndHeight(Lcd7920& lcd)
 {
 	if (width == 0)
 	{
@@ -153,6 +170,11 @@ void ButtonMenuItem::UpdateWidth(Lcd7920& lcd)
 		lcd.TextInvert(false);
 		CorePrint(lcd);
 		width = lcd.GetColumn();
+	}
+	if (height == 0)
+	{
+		lcd.SetFont(fontNumber);
+		height = lcd.GetFontHeight();
 	}
 }
 
@@ -199,7 +221,7 @@ PixelNumber ButtonMenuItem::GetVisibilityRowOffset(PixelNumber tCurrentOffset, P
 }
 
 ValueMenuItem::ValueMenuItem(PixelNumber r, PixelNumber c, PixelNumber w, Alignment a, FontNumber fn, Visibility vis, bool adj, unsigned int v, unsigned int d)
-	: MenuItem(r, c, ((w != 0) ? w : DefaultWidth), a, fn, vis), valIndex(v), currentValue(0.0), decimals(d), adjusting(AdjustMode::displaying), adjustable(adj)
+	: MenuItem(r, c, ((w != 0) ? w : DefaultWidth), a, fn, vis), valIndex(v), currentFormat(PrintFormat::undefined), decimals(d), adjusting(AdjustMode::displaying), adjustable(adj)
 {
 }
 
@@ -214,13 +236,54 @@ void ValueMenuItem::CorePrint(Lcd7920& lcd)
 	{
 		lcd.print("***");
 	}
-	else if (textValue != nullptr)
-	{
-		lcd.print(textValue);
-	}
 	else
 	{
-		lcd.print(currentValue, decimals);
+		switch (currentFormat)
+		{
+		case PrintFormat::asFloat:
+			lcd.print(currentValue.f, decimals);
+			break;
+
+		case PrintFormat::asPercent:
+			lcd.print(currentValue.f, decimals);
+			lcd.print('%');
+			break;
+
+		case PrintFormat::asUnsigned:
+			lcd.print(currentValue.u);
+			break;
+
+		case PrintFormat::asSigned:
+			lcd.print(currentValue.i);
+			break;
+
+		case PrintFormat::asText:
+			lcd.print(textValue);
+			break;
+
+		case PrintFormat::asIpAddress:
+			lcd.print(currentValue.u & 0x000000FF);
+			lcd.print(':');
+			lcd.print((currentValue.u >> 8) & 0x0000000FF);
+			lcd.print(':');
+			lcd.print((currentValue.u >> 16) & 0x0000000FF);
+			lcd.print(':');
+			lcd.print((currentValue.u >> 24) & 0x0000000FF);
+			break;
+
+		case PrintFormat::asTime:
+			lcd.print(currentValue.u/3600);
+			lcd.print(':');
+			lcd.print((currentValue.u / 60) % 60);
+			lcd.print(':');
+			lcd.print(currentValue.u % 60);
+			break;
+
+		case PrintFormat::undefined:
+		default:
+			lcd.print("***");
+			break;
+		}
 	}
 }
 
@@ -234,47 +297,52 @@ void ValueMenuItem::Draw(Lcd7920& lcd, PixelNumber rightMargin, bool highlight, 
 		// Item 501 is a special case because it is text, not a number. We store the current message sequence number in currentValue.
 		uint16_t newSeq;
 		textValue = reprap.GetLatestMessage(newSeq);
-		if (newSeq != (unsigned int)currentValue)
+		if (newSeq != currentValue.u)
 		{
 			itemChanged = true;
-			currentValue = (float)newSeq;
+			currentValue.u = newSeq;
+			currentFormat = PrintFormat::asText;
 		}
 	}
 	else if (adjusting != AdjustMode::adjusting)
 	{
 		const unsigned int itemNumber = valIndex % 100;
-		const float oldValue = currentValue;
+		const Value oldValue = currentValue;
+		currentFormat = PrintFormat::asFloat;
 
 		switch (valIndex/100)
 		{
 		case 0:		// heater current temperature
-			currentValue = max<float>(reprap.GetGCodes().GetItemCurrentTemperature(itemNumber), 0.0f);
+			currentValue.f = max<float>(reprap.GetGCodes().GetItemCurrentTemperature(itemNumber), 0.0f);
 			break;
 
 		case 1:		// heater active temperature
-			currentValue = max<float>(reprap.GetGCodes().GetItemActiveTemperature(itemNumber), 0.0f);
+			currentValue.f = max<float>(reprap.GetGCodes().GetItemActiveTemperature(itemNumber), 0.0f);
 			break;
 
 		case 2:		// heater standby temperature
-			currentValue = max<float>(reprap.GetGCodes().GetItemStandbyTemperature(itemNumber), 0.0f);
+			currentValue.f = max<float>(reprap.GetGCodes().GetItemStandbyTemperature(itemNumber), 0.0f);
 			break;
 
 		case 3:		// fan %
-			currentValue = ((itemNumber == 99)
+			currentValue.f = ((itemNumber == 99)
 							? reprap.GetGCodes().GetMappedFanSpeed()
 							: reprap.GetPlatform().GetFanValue(itemNumber)
 						   ) * 100.0;
+			currentFormat = PrintFormat::asPercent;
 			break;
 
 		case 4:		// extruder %
-			currentValue = reprap.GetGCodes().GetExtrusionFactor(itemNumber);
+			currentValue.f = reprap.GetGCodes().GetExtrusionFactor(itemNumber);
+			currentFormat = PrintFormat::asPercent;
 			break;
 
 		case 5:		// misc
 			switch (itemNumber)
 			{
 			case 0:
-				currentValue = reprap.GetGCodes().GetSpeedFactor();
+				currentValue.f = reprap.GetGCodes().GetSpeedFactor();
+				currentFormat = PrintFormat::asPercent;
 				break;
 
 			// case 1 is the latest message sent by M117, but it handled at the start
@@ -285,15 +353,16 @@ void ValueMenuItem::Draw(Lcd7920& lcd, PixelNumber rightMargin, bool highlight, 
 			case 13: // U
 			case 14: // V
 			case 15: // W
-				currentValue = reprap.GetGCodes().GetUserPosition()[itemNumber - 10];
+				currentValue.f = reprap.GetGCodes().GetUserPosition()[itemNumber - 10];
 				break;
 
 			case 20:
-				currentValue = reprap.GetCurrentToolNumber();
+				currentValue.i = reprap.GetCurrentToolNumber();
+				currentFormat = PrintFormat::asSigned;
 				break;
 
-			case 21: // Z baby-step
-				currentValue = reprap.GetGCodes().GetBabyStepOffset();
+			case 21:	// Z baby-step
+				currentValue.f = reprap.GetGCodes().GetTotalBabyStepOffset(Z_AXIS);
 				break;
 
 			// Platform's IP address is the "planned", Network's IP address is the "actual"
@@ -301,7 +370,34 @@ void ValueMenuItem::Draw(Lcd7920& lcd, PixelNumber rightMargin, bool highlight, 
 			case 31:
 			case 32:
 			case 33:
-				currentValue = reprap.GetNetwork().GetIPAddress(0).GetQuad(itemNumber - 30);
+				currentValue.u = reprap.GetNetwork().GetIPAddress(0).GetQuad(itemNumber - 30);
+				currentFormat = PrintFormat::asUnsigned;
+				break;
+
+			case 34:	// IP address in one go
+				currentValue.u = reprap.GetNetwork().GetIPAddress(0).GetV4LittleEndian();
+				currentFormat = PrintFormat::asIpAddress;
+				break;
+
+			case 35:	// Percentage of file that has been processed
+				currentValue.f = (reprap.GetPrintMonitor().IsPrinting())
+									? reprap.GetGCodes().FractionOfFilePrinted() * 100.0
+										: 0;
+				currentFormat = PrintFormat::asPercent;
+				break;
+
+			case 36:	// Print time remaining, file-based
+				currentValue.u = (reprap.GetPrintMonitor().IsPrinting())
+									? static_cast<int>(reprap.GetPrintMonitor().EstimateTimeLeft(PrintEstimationMethod::fileBased))
+										: 0;
+				currentFormat = PrintFormat::asTime;
+				break;
+
+			case 37:	// Print time remaining, filament-based
+				currentValue.u = (reprap.GetPrintMonitor().IsPrinting())
+									? static_cast<int>(reprap.GetPrintMonitor().EstimateTimeLeft(PrintEstimationMethod::filamentBased))
+										: 0;
+				currentFormat = PrintFormat::asTime;
 				break;
 
 			default:
@@ -314,9 +410,43 @@ void ValueMenuItem::Draw(Lcd7920& lcd, PixelNumber rightMargin, bool highlight, 
 			break;
 		}
 
-		if (error || currentValue != oldValue)
+		if (error)
 		{
 			itemChanged = true;
+		}
+		else
+		{
+			switch (currentFormat)
+			{
+			case PrintFormat::undefined:
+				itemChanged = true;
+				break;
+
+			case PrintFormat::asFloat:
+				if (currentValue.f != oldValue.f)
+				{
+					itemChanged = true;
+				}
+				break;
+
+			case PrintFormat::asSigned:
+				if (currentValue.i != oldValue.i)
+				{
+					itemChanged = true;
+				}
+				break;
+
+			case PrintFormat::asUnsigned:
+			case PrintFormat::asIpAddress:
+			case PrintFormat::asText:
+			case PrintFormat::asTime:
+			default:
+				if (currentValue.u != oldValue.u)
+				{
+					itemChanged = true;
+				}
+				break;
+			}
 		}
 	}
 
@@ -325,6 +455,7 @@ void ValueMenuItem::Draw(Lcd7920& lcd, PixelNumber rightMargin, bool highlight, 
 		highlighted = highlight;
 		PrintAligned(lcd, tOffset, rightMargin);
 		itemChanged = false;
+		drawn = true;
 	}
 }
 
@@ -332,6 +463,16 @@ bool ValueMenuItem::Select(const StringRef& cmd)
 {
 	adjusting = AdjustMode::adjusting;
 	return false;
+}
+
+void ValueMenuItem::UpdateWidthAndHeight(Lcd7920& lcd)
+{
+	// The width is always set for a ValueMenuItem so we just need to determine the height
+	if (height == 0)
+	{
+		lcd.SetFont(fontNumber);
+		height = lcd.GetFontHeight();
+	}
 }
 
 PixelNumber ValueMenuItem::GetVisibilityRowOffset(PixelNumber tCurrentOffset, PixelNumber fontHeight) const
@@ -350,9 +491,9 @@ bool ValueMenuItem::Adjust_SelectHelper()
 		switch (valIndex/100)
 		{
 		case 1: // heater active temperature
-			if (1 > currentValue) // 0 is off
+			if (1.0 > currentValue.f) // 0 is off
 			{
-				reprap.GetGCodes().SetItemActiveTemperature(itemNumber, -273.15f);
+				reprap.GetGCodes().SetItemActiveTemperature(itemNumber, -273.15);
 			}
 			else // otherwise ensure the tool is made active at the same time (really only matters for 79)
 			{
@@ -360,38 +501,38 @@ bool ValueMenuItem::Adjust_SelectHelper()
 				{
 					reprap.SelectTool(itemNumber, false);
 				}
-				reprap.GetGCodes().SetItemActiveTemperature(itemNumber, currentValue);
+				reprap.GetGCodes().SetItemActiveTemperature(itemNumber, currentValue.f);
 			}
 			break;
 
 		case 2: // heater standby temperature
-			reprap.GetGCodes().SetItemStandbyTemperature(itemNumber, (1 > currentValue) ? -273.15f : currentValue);
+			reprap.GetGCodes().SetItemStandbyTemperature(itemNumber, (1.0 > currentValue.f) ? -273.15 : currentValue.f);
 			break;
 
 		case 3: // fan %
 			if (itemNumber == 99)
 			{
-				reprap.GetGCodes().SetMappedFanSpeed(currentValue * 0.01);
+				reprap.GetGCodes().SetMappedFanSpeed(currentValue.f * 0.01);
 			}
 			else
 			{
-				reprap.GetPlatform().SetFanValue(itemNumber, currentValue * 0.01);
+				reprap.GetPlatform().SetFanValue(itemNumber, currentValue.f * 0.01);
 			}
 			break;
 
 		case 4: // extruder %
-			reprap.GetGCodes().SetExtrusionFactor(itemNumber, currentValue);
+			reprap.GetGCodes().SetExtrusionFactor(itemNumber, currentValue.f);
 			break;
 
 		case 5: // misc.
 			switch (itemNumber)
 			{
 			case 0:
-				reprap.GetGCodes().SetSpeedFactor(currentValue);
+				reprap.GetGCodes().SetSpeedFactor(currentValue.f);
 				break;
 
 			case 20:
-				reprap.SelectTool(currentValue, false);
+				reprap.SelectTool(currentValue.i, false);
 				break;
 
 			default:
@@ -444,40 +585,40 @@ bool ValueMenuItem::Adjust_AlterHelper(int clicks)
 			// Also cap the maximum
 			if (0 > clicks) // decrementing
 			{
-				currentValue += clicks;
-				if (95.0 > currentValue)
+				currentValue.f += (float)clicks;
+				if (95.0 > currentValue.f)
 				{
-					currentValue = 0;
+					currentValue.f = 0.0;
 				}
 			}
 			else // incrementing
 			{
-				if (0.0 == currentValue)
+				if (0.0 == currentValue.f)
 				{
-					currentValue = 95.0 - 1.0;
+					currentValue.f = 95.0 - 1.0;
 				}
-				currentValue = min<int>(currentValue + clicks, reprap.GetHeat().GetHighestTemperatureLimit(reprap.GetTool(itemNumber)->Heater(0)));
+				currentValue.f = min<int>(currentValue.f + (float)clicks, reprap.GetHeat().GetHighestTemperatureLimit(reprap.GetTool(itemNumber)->Heater(0)));
 			}
 		}
 		else
 		{
-			currentValue += (float)clicks;
+			currentValue.f += (float)clicks;
 		}
 		break;
 
 	case 3: // fan %
-		currentValue = constrain<int>(currentValue + (float)clicks, 0, 100);
+		currentValue.f = constrain<float>(currentValue.f + (float)clicks, 0.0, 100.0);
 		break;
 
 	case 5: // misc.
 		switch (itemNumber)
 		{
 		case 0: // 500 Feed Rate
-			currentValue = constrain<float>(currentValue + (float)clicks, 10, 500);
+			currentValue.f = constrain<float>(currentValue.f + (float)clicks, 10.0, 500.0);
 			break;
 
 		case 20: // 520 Tool Selection
-			currentValue = (float)constrain<int>((int)currentValue + clicks, -1, 255);
+			currentValue.i = constrain<int>((int)currentValue.f + clicks, -1, 255);
 			break;
 
 		case 21: // 521 baby stepping
@@ -503,7 +644,7 @@ bool ValueMenuItem::Adjust_AlterHelper(int clicks)
 		break;
 
 	default:
-		currentValue += (float)clicks;
+		currentValue.f += (float)clicks;
 		break;
 	}
 
@@ -550,7 +691,10 @@ void FilesMenuItem::EnterDirectory()
 	{
 		do
 		{
-			++m_uHardItemsInDirectory;
+			if (oFileInfo.fileName[0] != '.')
+			{
+				++m_uHardItemsInDirectory;
+			}
 		}
 		while (m_oMS->FindNext(oFileInfo));
 	}
@@ -620,9 +764,16 @@ void FilesMenuItem::Draw(Lcd7920& lcd, PixelNumber rightMargin, bool highlight, 
 		// Seek to the first file that is in view
 		FileInfo oFileInfo;
 		bool gotFileInfo = m_oMS->FindFirst(currentDirectory.c_str(), oFileInfo);
-		while (gotFileInfo && dirEntriesToSkip != 0)
+		while (gotFileInfo)
 		{
-			--dirEntriesToSkip;
+			if (oFileInfo.fileName[0] != '.')
+			{
+				if (dirEntriesToSkip == 0)
+				{
+					break;
+				}
+				--dirEntriesToSkip;
+			}
 			gotFileInfo =  m_oMS->FindNext(oFileInfo);
 		}
 
@@ -657,12 +808,17 @@ void FilesMenuItem::Draw(Lcd7920& lcd, PixelNumber rightMargin, bool highlight, 
 			{
 				break;		// skip getting more file info for efficiency
 			}
-			gotFileInfo = m_oMS->FindNext(oFileInfo);
+
+			do
+			{
+				gotFileInfo = m_oMS->FindNext(oFileInfo);
+			} while (gotFileInfo && oFileInfo.fileName[0] == '.');
 		}
 
 		m_oMS->AbandonFindNext();				// release the mutex, there may be more files that we don't have room to display
 
 		itemChanged = false;
+		drawn = true;
 		highlighted = highlight;
 	}
 }
@@ -763,9 +919,16 @@ bool FilesMenuItem::Select(const StringRef& cmd)
 		// Seek to the selected file
 		FileInfo oFileInfo;
 		bool gotFileInfo = m_oMS->FindFirst(currentDirectory.c_str(), oFileInfo);
-		while (gotFileInfo && dirEntriesToSkip != 0)
+		while (gotFileInfo)
 		{
-			--dirEntriesToSkip;
+			if (oFileInfo.fileName[0] != '.')
+			{
+				if (dirEntriesToSkip == 0)
+				{
+					break;
+				}
+				--dirEntriesToSkip;
+			}
 			gotFileInfo = m_oMS->FindNext(oFileInfo);
 		}
 		m_oMS->AbandonFindNext();
@@ -811,6 +974,16 @@ bool FilesMenuItem::Select(const StringRef& cmd)
 	}
 
 	return false;
+}
+
+void FilesMenuItem::UpdateWidthAndHeight(Lcd7920& lcd)
+{
+	// The width is always set for a FilesMenuItem so we just need to determine the height
+	if (height == 0)
+	{
+		lcd.SetFont(fontNumber);
+		height = lcd.GetFontHeight() * numDisplayLines;
+	}
 }
 
 PixelNumber FilesMenuItem::GetVisibilityRowOffset(PixelNumber tCurrentOffset, PixelNumber fontHeight) const
@@ -859,21 +1032,23 @@ void ImageMenuItem::Draw(Lcd7920& lcd, PixelNumber rightMargin, bool highlight, 
 			fs->Close();
 		}
 		itemChanged = false;
+		drawn = true;
 		highlighted = highlight;
 	}
 }
 
-void ImageMenuItem::UpdateWidth(Lcd7920& lcd)
+void ImageMenuItem::UpdateWidthAndHeight(Lcd7920& lcd)
 {
-	if (width == 0)
+	if (width == 0 || height == 0)
 	{
 		FileStore * const fs = reprap.GetPlatform().OpenFile(MENU_DIR, fileName.c_str(), OpenMode::read);
 		if (fs != nullptr)
 		{
-			uint8_t w;
-			fs->Read(w);			// read the number of columns
+			uint8_t w[2];
+			fs->Read(w, 2);			// read the number of columns
 			fs->Close();
-			width = w;
+			width = w[0];
+			height = w[1];
 		}
 	}
 }

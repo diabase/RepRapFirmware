@@ -25,6 +25,7 @@
 #include "Movement/DDA.h"
 #include "Movement/Move.h"
 #include "Movement/StepTimer.h"
+#include "Tools/Tool.h"
 #include "Network.h"
 #include "PrintMonitor.h"
 #include "FilamentMonitors/FilamentMonitor.h"
@@ -63,7 +64,14 @@
 # include "Display/Display.h"
 #endif
 
+#if HAS_NETWORKING && !HAS_LEGACY_NETWORKING
+# include "Networking/HttpResponder.h"
+# include "Networking/FtpResponder.h"
+# include "Networking/TelnetResponder.h"
+#endif
+
 #include <climits>
+#include <utility>					// for std::swap
 
 extern uint32_t _estack;			// defined in the linker script
 
@@ -163,7 +171,8 @@ Platform::Platform() :
 #if HAS_SMART_DRIVERS
 		nextDriveToPoll(0),
 #endif
-		lastFanCheckTime(0), auxGCodeReply(nullptr), tickState(0), debugCode(0), lastWarningMillis(0), deliberateError(false), i2cInitialised(false)
+		lastFanCheckTime(0), auxGCodeReply(nullptr), sysDir(nullptr), tickState(0), debugCode(0),
+		lastWarningMillis(0), deliberateError(false), i2cInitialised(false)
 {
 	massStorage = new MassStorage(this);
 }
@@ -173,10 +182,7 @@ Platform::Platform() :
 // Initialise the Platform. Note: this is the first module to be initialised, so don't call other modules from here!
 void Platform::Init()
 {
-	if (DiagPin != NoPin)
-	{
-		pinMode(DiagPin, OUTPUT_LOW);				// set up diag LED for debugging and turn it off
-	}
+	pinMode(DiagPin, OUTPUT_LOW);				// set up diag LED for debugging and turn it off
 
 	// Deal with power first (we assume this doesn't depend on identifying the board type)
 	pinMode(ATX_POWER_PIN, OUTPUT_LOW);
@@ -184,10 +190,16 @@ void Platform::Init()
 
 	SetBoardType(BoardType::Auto);
 
-#ifdef PCCB
+#if defined(PCCB_10) || defined(PCCB_08_X5)
+	pinMode(GlobalTmc2660EnablePin, OUTPUT_HIGH);
+#endif
+
+#if defined(PCCB_08) || defined(PCCB_08_X5)
 	// Make sure the on-board TMC22xx drivers are disabled
 	pinMode(GlobalTmc22xxEnablePin, OUTPUT_HIGH);
+#endif
 
+#if defined(PCCB)
 	// Ensure that the main LEDs are turned off.
 	// The main LED output is active low, just like a heater on the Duet 2 series.
 	// The secondary LED control dims the LED via the external controller when the output is high. So both outputs must be initialised high.
@@ -320,6 +332,7 @@ void Platform::Init()
 	ARRAY_INIT(endStopPins, END_STOP_PINS);
 
 	// Drives
+	minimumMovementSpeed = DefaultMinFeedrate;
 	maxFeedrates[X_AXIS] = maxFeedrates[Y_AXIS] = DefaultXYMaxFeedrate;
 	accelerations[X_AXIS] = accelerations[Y_AXIS] = DefaultXYAcceleration;
 	driveStepsPerUnit[X_AXIS] = driveStepsPerUnit[Y_AXIS] = DefaultXYDriveStepsPerUnit;
@@ -392,7 +405,7 @@ void Platform::Init()
 			// Set up the control pins and endstops
 			pinMode(STEP_PINS[drive], OUTPUT_LOW);
 			pinMode(DIRECTION_PINS[drive], OUTPUT_LOW);
-#if !defined(DUET3)
+#if !(defined(DUET3_V03) || defined(DUET3_V05))
 			pinMode(ENABLE_PINS[drive], OUTPUT_HIGH);				// this is OK for the TMC2660 CS pins too
 #endif
 
@@ -473,13 +486,14 @@ void Platform::Init()
 	numSmartDrivers = MaxSmartDrivers;							// for now we assume that expansion drivers are smart too
 #elif defined(PCCB)
 	numSmartDrivers = MaxSmartDrivers;
-#elif defined(DUET3)
+#elif defined(DUET3_V03) || defined(DUET3_V05)
 	numSmartDrivers = MaxSmartDrivers;
 #endif
 
+	driversPowered = false;
+
 #if HAS_SMART_DRIVERS
 	// Initialise TMC driver module
-	driversPowered = false;
 # if SUPPORT_TMC51xx
 	SmartDrivers::Init();
 # else
@@ -520,7 +534,6 @@ void Platform::Init()
 			configuredHeaters |= (1 << chamberHeater);
 		}
 	}
-	heatSampleTicks = HEAT_SAMPLE_TIME * SecondsToMillis;
 
 	// Enable pullups on all the SPI CS pins. This is required if we are using more than one device on the SPI bus.
 	// Otherwise, when we try to initialise the first device, the other devices may respond as well because their CS lines are not high.
@@ -747,7 +760,7 @@ int Platform::GetZProbeSecondaryValues(int& v1, int& v2)
 }
 
 // Get our best estimate of the Z probe temperature
-float Platform::GetZProbeTemperature()
+float Platform::GetZProbeTemperature() const
 {
 	for (size_t i = 0; i < NumBedHeaters; i++)
 	{
@@ -765,7 +778,7 @@ float Platform::GetZProbeTemperature()
 	return 25.0;							// assume 25C if we can't read the bed temperature
 }
 
-float Platform::ZProbeStopHeight()
+float Platform::GetZProbeStopHeight() const
 {
 	return GetCurrentZProbeParameters().GetStopHeight(GetZProbeTemperature());
 }
@@ -886,7 +899,7 @@ bool Platform::HomingZWithProbe() const
 // Check the prerequisites for updating the main firmware. Return True if satisfied, else print a message to 'reply' and return false.
 bool Platform::CheckFirmwareUpdatePrerequisites(const StringRef& reply)
 {
-	FileStore * const firmwareFile = OpenFile(GetSysDir(), IAP_FIRMWARE_FILE, OpenMode::read);
+	FileStore * const firmwareFile = OpenFile(DEFAULT_SYS_DIR, IAP_FIRMWARE_FILE, OpenMode::read);
 	if (firmwareFile == nullptr)
 	{
 		reply.printf("Firmware binary \"%s\" not found", IAP_FIRMWARE_FILE);
@@ -909,7 +922,7 @@ bool Platform::CheckFirmwareUpdatePrerequisites(const StringRef& reply)
 		return false;
 	}
 
-	if (!GetMassStorage()->FileExists(GetSysDir(), IAP_UPDATE_FILE))
+	if (!FileExists(DEFAULT_SYS_DIR, IAP_UPDATE_FILE))
 	{
 		reply.printf("In-application programming binary \"%s\" not found", IAP_UPDATE_FILE);
 		return false;
@@ -921,7 +934,7 @@ bool Platform::CheckFirmwareUpdatePrerequisites(const StringRef& reply)
 // Update the firmware. Prerequisites should be checked before calling this.
 void Platform::UpdateFirmware()
 {
-	FileStore * const iapFile = OpenFile(GetSysDir(), IAP_UPDATE_FILE, OpenMode::read);
+	FileStore * const iapFile = OpenFile(DEFAULT_SYS_DIR, IAP_UPDATE_FILE, OpenMode::read);
 	if (iapFile == nullptr)
 	{
 		MessageF(FirmwareUpdateMessage, "IAP not found\n");
@@ -939,7 +952,7 @@ void Platform::UpdateFirmware()
 	DisableCache();
 
 	// Step 1 - Write update binary to Flash and overwrite the remaining space with zeros
-	// Leave the last 1KB of Flash memory untouched, so we can reuse the NvData after this update
+	// On the SAM3X, leave the last 1KB of Flash memory untouched, so we can reuse the NvData after this update
 
 #if !defined(IFLASH_PAGE_SIZE) && defined(IFLASH0_PAGE_SIZE)
 # define IFLASH_PAGE_SIZE	IFLASH0_PAGE_SIZE
@@ -1331,7 +1344,7 @@ void Platform::Spin()
 		return;
 	}
 
-#ifdef DUET3
+#if defined(DUET3_V03) || defined(DUET3_V05)
 	// Blink the LED
 	{
 		static uint32_t lastTime = 0;
@@ -1373,12 +1386,11 @@ void Platform::Spin()
 		for (;;) {}
 	}
 
-#if HAS_SMART_DRIVERS
 	// Check whether the TMC drivers need to be initialised.
 	// The tick ISR also looks for over-voltage events, but it just disables the driver without changing driversPowerd or numOverVoltageEvents
 	if (driversPowered)
 	{
-# if HAS_VOLTAGE_MONITOR
+#if HAS_VOLTAGE_MONITOR
 		if (currentVin < driverPowerOffAdcReading)
 		{
 			driversPowered = false;
@@ -1392,8 +1404,9 @@ void Platform::Spin()
 			lastOverVoltageValue = currentVin;					// save this because the voltage may have changed by the time we report it
 		}
 		else
-# endif
+#endif
 		{
+#if HAS_SMART_DRIVERS
 			// Check one TMC2660 or TMC2224 for temperature warning or temperature shutdown
 			if (enableValues[nextDriveToPoll] >= 0)				// don't poll driver if it is flagged "no poll"
 			{
@@ -1454,7 +1467,7 @@ void Platform::Spin()
 					}
 				}
 
-#if HAS_STALL_DETECT
+# if HAS_STALL_DETECT
 				if ((stat & TMC_RR_SG) != 0)
 				{
 					if ((stalledDrivers & mask) == 0)
@@ -1479,10 +1492,10 @@ void Platform::Spin()
 				{
 					stalledDrivers &= ~mask;
 				}
-#endif
+# endif
 			}
 
-#if HAS_STALL_DETECT
+# if HAS_STALL_DETECT
 			// Action any pause or rehome actions due to motor stalls. This may have to be done more than once.
 			if (stalledDriversToRehome != 0)
 			{
@@ -1498,24 +1511,31 @@ void Platform::Spin()
 					stalledDriversToPause = 0;
 				}
 			}
-#endif
+# endif
 			// Advance drive number ready for next time
 			++nextDriveToPoll;
 			if (nextDriveToPoll == numSmartDrivers)
 			{
 				nextDriveToPoll = 0;
 			}
+#endif		// HAS_SMART_DRIVERS
 		}
 	}
-# if HAS_VOLTAGE_MONITOR
+#if HAS_VOLTAGE_MONITOR
 	else if (currentVin >= driverPowerOnAdcReading && currentVin <= driverNormalVoltageAdcReading)
+#else
+	else
+#endif
 	{
+		driversPowered = true;
+#if HAS_SMART_DRIVERS
 		openLoadATimer.Stop();
 		openLoadBTimer.Stop();
 		temperatureShutdownDrivers = temperatureWarningDrivers = shortToGroundDrivers = openLoadADrivers = openLoadBDrivers = notOpenLoadADrivers = notOpenLoadBDrivers = 0;
-		driversPowered = true;
+#endif
 	}
-# endif
+
+#if HAS_SMART_DRIVERS
 	SmartDrivers::Spin(driversPowered);
 #endif
 
@@ -1903,7 +1923,9 @@ void Platform::SoftwareReset(uint16_t reason, const uint32_t *stk)
 		srdBuf[slot].icsr = SCB->ICSR;
 		srdBuf[slot].bfar = SCB->BFAR;
 #ifdef RTOS
-		srdBuf[slot].taskName = *reinterpret_cast<const uint32_t*>(pcTaskGetName(nullptr));
+		// Get the task name if we can. There may be no task executing, so we must allow for this.
+		const TaskHandle_t currentTask = xTaskGetCurrentTaskHandle();
+		srdBuf[slot].taskName = (currentTask == nullptr) ? 0 : *reinterpret_cast<const uint32_t*>(pcTaskGetName(currentTask));
 #endif
 
 		if (stk != nullptr)
@@ -2493,23 +2515,25 @@ GCodeResult Platform::DiagnosticTest(GCodeBuffer& gb, const StringRef& reply, in
 		(void)RepRap::DoDivide(1, 0);					// call function in another module so it can't be optimised away
 		break;
 
-	case (int)DiagnosticTestType::UnalignedMemoryAccess:	// do an unaligned memory access to test exception handling
+	case (int)DiagnosticTestType::UnalignedMemoryAccess: // do an unaligned memory access to test exception handling
 		deliberateError = true;
 		SCB->CCR |= SCB_CCR_UNALIGN_TRP_Msk;			// by default, unaligned memory accesses are allowed, so change that
-		__DMB();										// make sure that instruction completes, don't allow prefetch
+		__DSB();										// make sure that instruction completes
+		__DMB();										// don't allow prefetch
 		(void)*(reinterpret_cast<const volatile char*>(dummy) + 1);
 		break;
 
 	case (int)DiagnosticTestType::BusFault:
-		deliberateError = true;
 		// Read from the "Undefined (Abort)" area
 #if SAME70
 		// FIXME: The SAME70 provides an MPU, maybe we should configure it as well?
 		// I guess this can wait until we have the RTOS working though.
 		Message(WarningMessage, "There is no abort area on the SAME70");
 #elif SAM4E || SAM4S
+		deliberateError = true;
 		(void)*(reinterpret_cast<const volatile char*>(0x20800000));
 #elif SAM3XA
+		deliberateError = true;
 		(void)*(reinterpret_cast<const volatile char*>(0x20200000));
 #elif __LPC17xx__
 		Message(WarningMessage, "TODO:: Skipping test on LPC");//????
@@ -2594,6 +2618,19 @@ GCodeResult Platform::DiagnosticTest(GCodeBuffer& gb, const StringRef& reply, in
 
 	case (int)DiagnosticTestType::TimeSDWrite:
 		return reprap.GetGCodes().StartSDTiming(gb, reply);
+
+	case (int)DiagnosticTestType::PrintObjectSizes:
+		reply.printf(
+				"DDA %u, DM %u, Tool %u"
+#if HAS_NETWORKING && !HAS_LEGACY_NETWORKING
+				", HTTP resp %u, FTP resp %u, Telnet resp %u"
+#endif
+				, sizeof(DDA), sizeof(DriveMovement), sizeof(Tool)
+#if HAS_NETWORKING && !HAS_LEGACY_NETWORKING
+				, sizeof(HttpResponder), sizeof(FtpResponder), sizeof(TelnetResponder)
+#endif
+			);
+		break;
 
 #ifdef DUET_NG
 	case (int)DiagnosticTestType::PrintExpanderStatus:
@@ -2684,17 +2721,17 @@ void Platform::UpdateConfiguredHeaters()
 	}
 }
 
-EndStopHit Platform::Stopped(size_t drive) const
+EndStopHit Platform::Stopped(size_t axisOrExtruder) const
 {
 	const size_t numAxes = reprap.GetGCodes().GetTotalAxes();
-	if (drive < numAxes)
+	if (axisOrExtruder < numAxes)
 	{
-		switch (endStopInputType[drive])
+		switch (endStopInputType[axisOrExtruder])
 		{
 		case EndStopInputType::zProbe:
 			{
 				const EndStopHit rslt = GetZProbeResult();
-				return (rslt == EndStopHit::lowHit && endStopPos[drive] == EndStopPosition::highEndStop)
+				return (rslt == EndStopHit::lowHit && endStopPos[axisOrExtruder] == EndStopPosition::highEndStop)
 						? EndStopHit::highHit
 							: rslt;
 			}
@@ -2703,64 +2740,56 @@ EndStopHit Platform::Stopped(size_t drive) const
 		case EndStopInputType::motorStall:
 			{
 				bool motorIsStalled;
-				switch (reprap.GetMove().GetKinematics().GetKinematicsType())
+				const Kinematics& k = reprap.GetMove().GetKinematics();
+				if (k.GetHomingMode() == HomingMode::homeIndividualMotors)
 				{
-				case KinematicsType::coreXY:
-					// Both X and Y motors are involved in homing X or Y
-					motorIsStalled = (drive == X_AXIS || drive == Y_AXIS)
-										? AnyAxisMotorStalled(X_AXIS) || AnyAxisMotorStalled(Y_AXIS)
-											: AnyAxisMotorStalled(drive);
-					break;
-
-				case KinematicsType::coreXYU:
-					// Both X and Y motors are involved in homing X or Y, and both U and V motors are involved in homing U
-					motorIsStalled = (drive == X_AXIS || drive == Y_AXIS)
-										? AnyAxisMotorStalled(X_AXIS) || AnyAxisMotorStalled(Y_AXIS)
-											: (drive == U_AXIS)
-												? AnyAxisMotorStalled(U_AXIS) || AnyAxisMotorStalled(V_AXIS)
-													: AnyAxisMotorStalled(drive);
-					break;
-
-				case KinematicsType::coreXYUV:
-					// Both X and Y motors are involved in homing X or Y, and both U and V motors are involved in homing U and V
-					motorIsStalled = (drive == X_AXIS || drive == Y_AXIS)
-										? AnyAxisMotorStalled(X_AXIS) || AnyAxisMotorStalled(Y_AXIS)
-											: (drive == U_AXIS || drive == V_AXIS)
-												? AnyAxisMotorStalled(U_AXIS) || AnyAxisMotorStalled(V_AXIS)
-													: AnyAxisMotorStalled(drive);
-					break;
-
-				case KinematicsType::coreXZ:
-					// Both X and Z motors are involved in homing X or Z
-					motorIsStalled = (drive == X_AXIS || drive == Z_AXIS)
-										? AnyAxisMotorStalled(X_AXIS) || AnyAxisMotorStalled(Z_AXIS)
-											: AnyAxisMotorStalled(drive);
-					break;
-
-				default:
-					motorIsStalled = AnyAxisMotorStalled(drive);
-					break;
+					motorIsStalled = AnyAxisMotorStalled(axisOrExtruder);
+				}
+				else
+				{
+					AxesBitmap connectedAxes = k.GetConnectedAxes(axisOrExtruder);
+					if (connectedAxes == MakeBitmap<AxesBitmap>(axisOrExtruder))
+					{
+						// Optimisation: no need to search the connectedAxes bitmap in the common case of no connected axes
+						motorIsStalled = AnyAxisMotorStalled(axisOrExtruder);
+					}
+					else
+					{
+						motorIsStalled = false;
+						for (size_t motor = 0; connectedAxes != 0; ++motor)
+						{
+							if (IsBitSet(connectedAxes, motor))
+							{
+								if (AnyAxisMotorStalled(motor))
+								{
+									motorIsStalled = true;
+									break;
+								}
+								ClearBit(connectedAxes, motor);
+							}
+						}
+					}
 				}
 				return (!motorIsStalled) ? EndStopHit::noStop
-						: (endStopPos[drive] == EndStopPosition::highEndStop) ? EndStopHit::highHit
+						: (endStopPos[axisOrExtruder] == EndStopPosition::highEndStop) ? EndStopHit::highHit
 							: EndStopHit::lowHit;
 			}
 			break;
 #endif
 
 		case EndStopInputType::activeLow:
-			if (drive < NumEndstops && endStopPins[drive] != NoPin)
+			if (axisOrExtruder < NumEndstops && endStopPins[axisOrExtruder] != NoPin)
 			{
-				const bool b = IoPort::ReadPin(endStopPins[drive]);
-				return (b) ? EndStopHit::noStop : (endStopPos[drive] == EndStopPosition::highEndStop) ? EndStopHit::highHit : EndStopHit::lowHit;
+				const bool b = IoPort::ReadPin(endStopPins[axisOrExtruder]);
+				return (b) ? EndStopHit::noStop : (endStopPos[axisOrExtruder] == EndStopPosition::highEndStop) ? EndStopHit::highHit : EndStopHit::lowHit;
 			}
 			break;
 
 		case EndStopInputType::activeHigh:
-			if (drive < NumEndstops && endStopPins[drive] != NoPin)
+			if (axisOrExtruder < NumEndstops && endStopPins[axisOrExtruder] != NoPin)
 			{
-				const bool b = !IoPort::ReadPin(endStopPins[drive]);
-				return (b) ? EndStopHit::noStop : (endStopPos[drive] == EndStopPosition::highEndStop) ? EndStopHit::highHit : EndStopHit::lowHit;
+				const bool b = !IoPort::ReadPin(endStopPins[axisOrExtruder]);
+				return (b) ? EndStopHit::noStop : (endStopPos[axisOrExtruder] == EndStopPosition::highEndStop) ? EndStopHit::highHit : EndStopHit::lowHit;
 			}
 			break;
 
@@ -2769,10 +2798,10 @@ EndStopHit Platform::Stopped(size_t drive) const
 		}
 	}
 #if HAS_STALL_DETECT
-	else if (drive < NumDirectDrivers)
+	else if (axisOrExtruder < NumDirectDrivers)
 	{
 		// Endstop is for an extruder drive, so use stall detection
-		return (ExtruderMotorStalled(drive - numAxes)) ? EndStopHit::highHit : EndStopHit::noStop;
+		return (ExtruderMotorStalled(axisOrExtruder - numAxes)) ? EndStopHit::highHit : EndStopHit::noStop;
 	}
 #endif
 	return EndStopHit::noStop;
@@ -2917,7 +2946,7 @@ void Platform::EnableDriver(size_t driver)
 			driverState[driver] = DriverStatus::enabled;
 			UpdateMotorCurrent(driver);						// the current may have been reduced by the idle timeout
 
-#if defined(DUET3) && HAS_SMART_DRIVERS
+#if (defined(DUET3_V03) || defined(DUET3_V05)) && HAS_SMART_DRIVERS
 			SmartDrivers::EnableDrive(driver, true);		// all drivers driven directly by the main board are smart
 #elif HAS_SMART_DRIVERS
 			if (driver < numSmartDrivers)
@@ -2942,7 +2971,7 @@ void Platform::DisableDriver(size_t driver)
 {
 	if (driver < NumDirectDrivers)
 	{
-#if defined(DUET3) && HAS_SMART_DRIVERS
+#if (defined(DUET3_V03) || defined(DUET3_V05)) && HAS_SMART_DRIVERS
 		SmartDrivers::EnableDrive(driver, false);		// all drivers driven directly by the main board are smart
 #elif HAS_SMART_DRIVERS
 		if (driver < numSmartDrivers)
@@ -3201,6 +3230,20 @@ void Platform::SetIdleCurrentFactor(float f)
 	}
 }
 
+void Platform::SetDriveStepsPerUnit(size_t axisOrExtruder, float value, uint32_t microstepping)
+{
+	if (microstepping > 0)
+	{
+		bool dummy;
+		const unsigned int currentMicrostepping = GetMicrostepping(axisOrExtruder, dummy);
+		if (currentMicrostepping != microstepping)
+		{
+			value = value * (float)currentMicrostepping / (float)microstepping;
+		}
+	}
+	driveStepsPerUnit[axisOrExtruder] = max<float>(value, 1.0);	// don't allow zero or negative
+}
+
 // Set the microstepping for a driver, returning true if successful
 bool Platform::SetDriverMicrostepping(size_t driver, unsigned int microsteps, int mode)
 {
@@ -3310,15 +3353,17 @@ void Platform::SetEnableValue(size_t driver, int8_t eVal)
 #endif
 }
 
-void Platform::SetAxisDriversConfig(size_t axis, const AxisDriversConfig& config)
+void Platform::SetAxisDriversConfig(size_t axis, size_t numValues, const uint32_t driverNumbers[])
 {
-	axisDrivers[axis] = config;
+	axisDrivers[axis].numDrivers = numValues;
 	uint32_t bitmap = 0;
-	for (size_t i = 0; i < config.numDrivers; ++i)
+	for (size_t i = 0; i < numValues; ++i)
 	{
-		bitmap |= CalcDriverBitmap(config.driverNumbers[i]);
+		const uint8_t driver = min<uint32_t>(driverNumbers[i], 255);
+		axisDrivers[axis].driverNumbers[i] = driver;
+		bitmap |= CalcDriverBitmap(driver);
 #if HAS_SMART_DRIVERS
-		SmartDrivers::SetAxisNumber(config.driverNumbers[i], axis);
+		SmartDrivers::SetAxisNumber(driver, axis);
 #endif
 	}
 	driveDriverBits[axis] = bitmap;
@@ -3409,7 +3454,7 @@ void Platform::SetFanValue(size_t fan, float speed)
 // Enable or disable the fan that shares its PWM pin with the last heater. Called when we disable or enable the last heater.
 void Platform::EnableSharedFan(bool enable)
 {
-	const size_t sharedFanNumber = NUM_FANS - 1;
+	const size_t sharedFanNumber = 1;				// Fan 1 on Duet 085 is shared with heater 6
 	fans[sharedFanNumber].Init(
 				(enable) ? COOLING_FAN_PINS[sharedFanNumber] : NoPin,
 				(enable) ? Fan0LogicalPin + sharedFanNumber : NoLogicalPin,
@@ -3444,6 +3489,8 @@ bool Platform::FansHardwareInverted(size_t fanNumber) const
 	// The cooling fan output pin gets inverted on a Duet 0.6 or 0.7.
 	// We allow a second fan controlled by a mosfet on the PC4 pin, which is not inverted.
 	return fanNumber == 0 && (board == BoardType::Duet_06 || board == BoardType::Duet_07);
+#elif defined(PCCB_10)
+	return fanNumber == 5;
 #else
 	return false;
 #endif
@@ -3454,7 +3501,9 @@ void Platform::InitFans()
 	for (size_t i = 0; i < NUM_FANS; ++i)
 	{
 		fans[i].Init(COOLING_FAN_PINS[i], Fan0LogicalPin + i, FansHardwareInverted(i),
-#ifdef PCCB
+#if defined(PCCB_10)
+						(i == 5) ? 25000 : DefaultFanPwmFreq				// PCCB fan 5 has 4-wire fan connectors for Intel-spec PWM fans
+#elif defined(PCCB_08) || defined(PCCB_08_X5)
 						(i == 3) ? 25000 : DefaultFanPwmFreq				// PCCB fan 3 has 4-wire fan connectors for Intel-spec PWM fans
 #else
 						DefaultFanPwmFreq
@@ -3998,8 +4047,10 @@ void Platform::SetBoardType(BoardType bt)
 {
 	if (bt == BoardType::Auto)
 	{
-#if defined(DUET3)
-		board = BoardType::Duet3_10;
+#if defined(DUET3_V03)
+		board = BoardType::Duet3_03;
+#elif defined(DUET3_V05)
+		board = BoardType::Duet3_05;
 #elif defined(SAME70XPLD)
 		board = BoardType::SAME70XPLD_0;
 #elif defined(DUET_NG)
@@ -4044,8 +4095,10 @@ void Platform::SetBoardType(BoardType bt)
 		board = BoardType::RADDS_15;
 #elif defined(__ALLIGATOR__)
 		board = BoardType::Alligator_2;
-#elif defined(PCCB)
-		board = BoardType::PCCB_10;
+#elif defined(PCCB_10)
+		board = BoardType::PCCB_v10;
+#elif defined(PCCB_08) || defined(PCCB_08_X5)
+		board = BoardType::PCCB_v08;
 #elif defined(__LPC17xx__)
 		board = BoardType::Lpc;
 #else
@@ -4069,8 +4122,10 @@ const char* Platform::GetElectronicsString() const
 {
 	switch (board)
 	{
-#if defined(DUET3)
-	case BoardType::Duet3_10:				return "Duet 3 prototype 1";
+#if defined(DUET3_V03)
+	case BoardType::Duet3_03:				return "Duet 3 prototype v0.3";
+#elif defined(DUET3_V05)
+	case BoardType::Duet3_05:				return "Duet 3 prototype v0.5";
 #elif defined(SAME70XPLD)
 	case BoardType::SAME70XPLD_0:			return "SAME70-XPLD";
 #elif defined(DUET_NG)
@@ -4088,8 +4143,10 @@ const char* Platform::GetElectronicsString() const
 	case BoardType::RADDS_15:				return "RADDS 1.5";
 #elif defined(__ALLIGATOR__)
 	case BoardType::Alligator_2:			return "Alligator r2";
-#elif defined(PCCB)
-	case BoardType::PCCB_10:				return "PCCB 1.0";
+#elif defined(PCCB_10)
+	case BoardType::PCCB_v10:				return "PC001373";
+#elif defined(PCCB_08) || defined(PCCB_08_X5)
+	case BoardType::PCCB_v08:				return "PCCB 0.8";
 #elif defined(__LPC17xx__)
 	case BoardType::Lpc:					return LPC_ELECTRONICS_STRING;
 #else
@@ -4104,8 +4161,10 @@ const char* Platform::GetBoardString() const
 {
 	switch (board)
 	{
-#if defined(DUET3)
-	case BoardType::Duet3_10:				return "duet3proto";
+#if defined(DUET3_V03)
+	case BoardType::Duet3_03:				return "duet3proto";
+#elif defined(DUET3_V05)
+	case BoardType::Duet3_05:				return "duet3proto";
 #elif defined(SAME70XPLD)
 	case BoardType::SAME70XPLD_0:			return "same70xpld";
 #elif defined(DUET_NG)
@@ -4123,8 +4182,10 @@ const char* Platform::GetBoardString() const
 	case BoardType::RADDS_15:				return "radds15";
 #elif defined(__ALLIGATOR__)
 	case BoardType::Alligator_2:			return "alligator2";
-#elif defined(PCCB)
-	case BoardType::PCCB_10:				return "pccb10";
+#elif defined(PCCB_10)
+	case BoardType::PCCB_v10:				return "pc001373";
+#elif defined(PCCB_08) || defined(PCCB_08_X5)
+	case BoardType::PCCB_v08:				return "pccb08";
 #elif defined(__LPC17xx__)
 	case BoardType::Lpc:					return LPC_BOARD_STRING;
 #else
@@ -4141,6 +4202,94 @@ bool Platform::IsDuetWiFi() const
 	return board == BoardType::DuetWiFi_10 || board == BoardType::DuetWiFi_102;
 }
 #endif
+
+// Where the system files are. Not thread safe!
+const char* Platform::InternalGetSysDir() const
+{
+	return (sysDir != nullptr) ? sysDir : DEFAULT_SYS_DIR;
+}
+
+// Open a file
+FileStore* Platform::OpenFile(const char* folder, const char* fileName, OpenMode mode, uint32_t preAllocSize) const
+{
+	String<MaxFilenameLength> location;
+	MassStorage::CombineName(location.GetRef(), folder, fileName);
+	return massStorage->OpenFile(location.c_str(), mode, preAllocSize);
+}
+
+bool Platform::Delete(const char* folder, const char *filename) const
+{
+	String<MaxFilenameLength> location;
+	MassStorage::CombineName(location.GetRef(), folder, filename);
+	return massStorage->Delete(location.c_str());
+}
+
+bool Platform::FileExists(const char* folder, const char *filename) const
+{
+	String<MaxFilenameLength> location;
+	MassStorage::CombineName(location.GetRef(), folder, filename);
+	return massStorage->FileExists(location.c_str());
+}
+
+bool Platform::DirectoryExists(const char *folder, const char *dir) const
+{
+	String<MaxFilenameLength> location;
+	MassStorage::CombineName(location.GetRef(), folder, dir);
+	return massStorage->DirectoryExists(location.c_str());
+}
+
+// Set the system files path
+void Platform::SetSysDir(const char* dir)
+{
+	String<MaxFilenameLength> newSysDir;
+	MutexLocker lock(Tasks::GetSysDirMutex());
+
+	massStorage->CombineName(newSysDir.GetRef(), InternalGetSysDir(), dir);
+	if (!newSysDir.EndsWith('/'))
+	{
+		newSysDir.cat('/');
+	}
+
+	const size_t len = newSysDir.strlen() + 1;
+	char* const nsd = new char[len];
+	memcpy(nsd, newSysDir.c_str(), len);
+	const char *nsd2 = nsd;
+	std::swap(sysDir, nsd2);
+	delete nsd2;
+}
+
+bool Platform::SysFileExists(const char *filename) const
+{
+	String<MaxFilenameLength> location;
+	MakeSysFileName(location.GetRef(), filename);
+	return massStorage->FileExists(location.c_str());
+}
+
+FileStore* Platform::OpenSysFile(const char *filename, OpenMode mode) const
+{
+	String<MaxFilenameLength> location;
+	MakeSysFileName(location.GetRef(), filename);
+	return massStorage->OpenFile(location.c_str(), mode, 0);
+}
+
+bool Platform::DeleteSysFile(const char *filename) const
+{
+	String<MaxFilenameLength> location;
+	MakeSysFileName(location.GetRef(), filename);
+	return massStorage->Delete(location.c_str());
+}
+
+void Platform::MakeSysFileName(const StringRef& result, const char *filename) const
+{
+	MutexLocker lock(Tasks::GetSysDirMutex());
+	MassStorage::CombineName(result, InternalGetSysDir(), filename);
+}
+
+void Platform::GetSysDir(const StringRef & path) const
+{
+	MutexLocker lock(Tasks::GetSysDirMutex());
+	path.copy(InternalGetSysDir());
+}
 
 // User I/O and servo support
 // Translate a logical pin to a firmware pin and whether the output of that pin is normally inverted
@@ -4415,7 +4564,13 @@ float Platform::GetCurrentPowerVoltage() const
 // TMC driver temperatures
 float Platform::GetTmcDriversTemperature(unsigned int board) const
 {
+#ifdef PCCB_10
+	const uint16_t mask = (board == 0)
+							? ((1u << 2) - 1)						// drivers 0, 1 are on-board
+								: ((1u << 5) - 1) << 2;				// drivers 2-7 or on the DueX5
+#else
 	const uint16_t mask = ((1u << 5) - 1) << (5 * board);			// there are 5 drivers on each board
+#endif
 	return ((temperatureShutdownDrivers & mask) != 0) ? 150.0
 			: ((temperatureWarningDrivers & mask) != 0) ? 100.0
 				: 0.0;

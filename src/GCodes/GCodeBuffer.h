@@ -35,7 +35,6 @@ public:
 	float GetFValue() __attribute__((hot));				// Get a float after a key letter
 	int32_t GetIValue() __attribute__((hot));			// Get an integer after a key letter
 	uint32_t GetUIValue();								// Get an unsigned integer value
-	uint32_t GetUIValueMaybeHex();						// Get an unsigned integer value that might be written in hex format
 	bool GetIPAddress(IPAddress& returnedIp);			// Get an IP address quad after a key letter
 	bool GetMacAddress(uint8_t mac[6]);					// Get a MAC address sextet after a key letter
 	bool GetUnprecedentedString(const StringRef& str);	// Get a string with no preceding key letter
@@ -48,7 +47,6 @@ public:
 	bool TryGetFValue(char c, float& val, bool& seen);
 	bool TryGetIValue(char c, int32_t& val, bool& seen);
 	bool TryGetUIValue(char c, uint32_t& val, bool& seen);
-	bool TryGetUIValueMaybeHex(char c, uint32_t& val, bool& seen);
 	bool TryGetBValue(char c, bool& val, bool& seen);
 	bool TryGetFloatArray(char c, size_t numVals, float vals[], const StringRef& reply, bool& seen, bool doPad = false);
 	bool TryGetUIArray(char c, size_t numVals, uint32_t vals[], const StringRef& reply, bool& seen, bool doPad = false);
@@ -65,8 +63,11 @@ public:
 	void SetToolNumberAdjust(int arg) { toolNumberAdjust = arg; }
 	void SetCommsProperties(uint32_t arg) { checksumRequired = (arg & 1); }
 	MessageType GetResponseMessageType() const { return responseMessageType; }
+
 	GCodeMachineState& MachineState() const { return *machineState; }
 	GCodeMachineState& OriginalMachineState() const;
+	float ConvertDistance(float distance) const;
+	float InverseConvertDistance(float distance) const;
 	bool PushState();									// Push state returning true if successful (i.e. stack not overflowed)
 	bool PopState();									// Pop state returning true if successful (i.e. no stack underrun)
 	void AbortFile(FileGCodeInput* fileInput);			// Abort execution of any files or macros being executed

@@ -416,7 +416,7 @@ void GCodeBuffer::SetFinished(bool f)
 		}
 		else
 		{
-			machineState->useMachineCoordinates = false;		// G53 does not persist beyond the current line
+			machineState->g53Active = false;		// G53 does not persist beyond the current line
 			Init();
 		}
 	}
@@ -436,7 +436,7 @@ FilePosition GCodeBuffer::GetFilePosition(size_t bytesCached) const
 	return noFilePosition;
 }
 
-// Is 'c' in the G Code string?
+// Is 'c' in the G Code string? 'c' must be uppercase.
 // Leave the pointer there for a subsequent read.
 bool GCodeBuffer::Seen(char c)
 {
@@ -451,7 +451,7 @@ bool GCodeBuffer::Seen(char c)
 		}
 		else if (!inQuotes)
 		{
-			if (inBrackets == 0 && toupper(b) == c)
+			if (inBrackets == 0 && toupper(b) == c && (c != 'E' || (unsigned int)readPointer == parameterStart || !isdigit(gcodeBuffer[readPointer - 1])))
 			{
 				return true;
 			}
@@ -769,51 +769,12 @@ uint32_t GCodeBuffer::GetUIValue()
 {
 	if (readPointer >= 0)
 	{
-		const uint32_t result = SafeStrtoul(&gcodeBuffer[readPointer + 1]);
+		const uint32_t result = ReadUIValue(&gcodeBuffer[readPointer + 1], nullptr);
 		readPointer = -1;
 		return result;
 	}
 
 	INTERNAL_ERROR;
-	return 0;
-}
-
-// Get an uint32 after a G Code letter, interpreting quoted numbers starting with x or X or 0x or 0X as hex
-uint32_t GCodeBuffer::GetUIValueMaybeHex()
-{
-	if (readPointer >= 0)
-	{
-		int base = 10;
-		size_t skip = 1;
-
-		// Allow "0xNNNN" or "xNNNN" where NNNN are hex digits
-		if (gcodeBuffer[readPointer + 1] == '"')
-		{
-			switch (gcodeBuffer[readPointer + 2])
-			{
-			case 'x':
-			case 'X':
-				base = 16;
-				skip = 3;
-				break;
-
-			case '0':
-				if (gcodeBuffer[readPointer + 3] == 'x' || gcodeBuffer[readPointer + 3] == 'X')
-				{
-					base = 16;
-					skip = 4;
-				}
-				break;
-
-			default:
-				break;
-			}
-		}
-		const uint32_t result = SafeStrtoul(&gcodeBuffer[readPointer + skip], nullptr, base);
-		readPointer = -1;
-		return result;
-	}
- 	INTERNAL_ERROR;
 	return 0;
 }
 
@@ -848,18 +809,6 @@ bool GCodeBuffer::TryGetUIValue(char c, uint32_t& val, bool& seen)
 	if (ret)
 	{
 		val = GetUIValue();
-		seen = true;
-	}
-	return ret;
-}
-
-// If the specified parameter character is found, fetch 'value' and set 'seen'. Otherwise leave val and seen alone.
-bool GCodeBuffer::TryGetUIValueMaybeHex(char c, uint32_t& val, bool& seen)
-{
-	const bool ret = Seen(c);
-	if (ret)
-	{
-		val = GetUIValueMaybeHex();
 		seen = true;
 	}
 	return ret;
@@ -1039,6 +988,18 @@ GCodeMachineState& GCodeBuffer::OriginalMachineState() const
 	return *ms;
 }
 
+// Convert from inches to mm if necessary
+float GCodeBuffer::ConvertDistance(float distance) const
+{
+	return (machineState->usingInches) ? distance * InchToMm : distance;
+}
+
+// Convert from mm to inches if necessary
+float GCodeBuffer::InverseConvertDistance(float distance) const
+{
+	return (machineState->usingInches) ? distance/InchToMm : distance;
+}
+
 // Push state returning true if successful (i.e. stack not overflowed)
 bool GCodeBuffer::PushState()
 {
@@ -1060,13 +1021,14 @@ bool GCodeBuffer::PushState()
 	ms->lockedResources = machineState->lockedResources;
 	ms->drivesRelative = machineState->drivesRelative;
 	ms->axesRelative = machineState->axesRelative;
+	ms->usingInches = machineState->usingInches;
 	ms->doingFileMacro = machineState->doingFileMacro;
 	ms->waitWhileCooling = machineState->waitWhileCooling;
 	ms->runningM501 = machineState->runningM501;
 	ms->runningM502 = machineState->runningM502;
 	ms->volumetricExtrusion = false;
-	ms->useMachineCoordinates = false;
-	ms->useMachineCoordinatesSticky = machineState->useMachineCoordinatesSticky || machineState->useMachineCoordinates;
+	ms->g53Active = false;
+	ms->runningSystemMacro = machineState->runningSystemMacro;
 	ms->messageAcknowledged = false;
 	ms->waitingForAcknowledgement = false;
 	machineState = ms;
@@ -1330,7 +1292,37 @@ uint32_t GCodeBuffer::ReadUIValue(const char *p, const char **endptr)
 	}
 #endif
 
-	return SafeStrtoul(p, endptr);
+	int base = 10;
+	size_t skipTrailingQuote = 0;
+
+	// Allow "0xNNNN" or "xNNNN" where NNNN are hex digits
+	if (*p == '"')
+	{
+		++p;
+		skipTrailingQuote = 1;
+		switch (*p)
+		{
+		case 'x':
+		case 'X':
+			base = 16;
+			++p;
+			break;
+
+		case '0':
+			if (*(p + 1) == 'x' || *(p + 1) == 'X')
+			{
+				base = 16;
+				p += 2;
+			}
+			break;
+
+		default:
+			break;
+		}
+	}
+	const uint32_t result = SafeStrtoul(p, endptr, base);
+	endptr += skipTrailingQuote;
+	return result;
 }
 
 int32_t GCodeBuffer::ReadIValue(const char *p, const char **endptr)
