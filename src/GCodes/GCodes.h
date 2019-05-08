@@ -48,6 +48,7 @@ constexpr uint32_t ZProbeEndstopNumber = 1000;          // This is the special n
 
 typedef uint32_t TriggerInputsBitmap;					// Bitmap of input pins that a single trigger number responds to
 typedef uint32_t TriggerNumbersBitmap;					// Bitmap of trigger numbers
+static_assert(MaxTriggers <= sizeof(TriggerNumbersBitmap) * CHAR_BIT, "need larger TriggerNumbersBitmap type");
 
 struct Trigger
 {
