@@ -1,6 +1,24 @@
 Summary of important changes in recent versions
 ===============================================
 
+Version 2.03RC2
+=================
+
+Upgrade notes:
+- DueX2 and DueX5 users: if you have been experiencing high I2C error counts, then in the past this usually led to the machine printing very slowly when the errors started occurring. Changes to the I2C drivers should allow the machine to recover from the error in most cases. However, if it does not recover then the machine will most likely continue to run as normal, except that the states of endstops on the DueX will not be read correctly and commands to change settings of fans on the DueX won't work. So watch out for these different symptoms.
+- See upgrade notes for 2.03RC1.
+
+Compatible files:
+- DuetWiFiServer 1.23
+- DuetWebControl 1.22.6 or 2.0.0-RC6
+
+New features and changed behaviour:
+- When a DueX is attached, a separate task is now used to read the states of DueX endstop inputs when they change. This should give much lower latency.
+
+Bug fixes:
+- When I2C timeouts occurred, no attempt was made to reset the I2C controller before the next I2C transaction attempt. The I2C driver now resets the controller on the Duet MCU after an I2C error, also it retries the failed transaction twice.
+- Some PWM channels didn't work correctly in the Due06/085 build (this was also fixed in temporary release 2.03RC1+1).
+
 Version 2.03RC1
 =================
 
@@ -8,6 +26,10 @@ Upgrade notes:
 - The facility to map endstops using the A parameter in the M574 command has been withdrawn. Use RepRapFirmware 3 if you need an equivalent facility.
 - Duet Maestro users with a 12864 display may need to make minor changes to their menu files to correct for changes in spacing and automatic insertion of % characters after certain values e.g. fan speed
 - See also the upgrade notes for earlier releases, unless you are upgrading from 2.03beta3. **Tool change users please note:** tool offsets are now applied in tfree#.g and tpost#.g files (in firmware 2.02 they were not applied).
+
+Compatible files:
+- DuetWiFiServer 1.23
+- DuetWebControl 1.22.6 or 2.0.0-RC6
 
 New features and changed behaviour:
 - Endstop mapping and M574 A parameter have been removed
@@ -24,7 +46,7 @@ New features and changed behaviour:
 
 Bug fixes:
 - M585 works again
-- In resurrect.g file the M290 command now commands absolute babystepping, the filename in M23 command is enclosed in double quote marks, ands the inches/mm setting is restored
+- In resurrect.g file the M290 command now commands absolute babystepping, the filename in M23 command is enclosed in double quote marks, and the inches/mm setting is restored
 - The W5500 chip could not be reset on Duet Maestro
 - M109 did not run the tool change files if no tool was active initially
 - If a print finishes or is cancelled when Z hop is active because of a G10 command without a subsequent G11, the Z hop is cancelled (but not the associated retraction)
