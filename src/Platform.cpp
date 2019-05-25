@@ -384,14 +384,15 @@ void Platform::Init()
 
 	for (size_t drive = 0; drive < MaxTotalDrivers; drive++)
 	{
-		enableValues[drive] = 0;					// assume active low enable signal
-		directions[drive] = true;					// drive moves forwards by default
+		enableValues[drive] = 0;									// assume active low enable signal
+		directions[drive] = true;									// drive moves forwards by default
 		motorCurrents[drive] = 0.0;
 		motorCurrentFraction[drive] = 1.0;
 		driverState[drive] = DriverStatus::disabled;
+		driveDriverBits[drive + MaxTotalDrivers] = CalcDriverBitmap(drive);
 
 		// Map axes and extruders straight through
-		driveDriverBits[drive] = driveDriverBits[drive + MaxTotalDrivers] = CalcDriverBitmap(drive);	// this returns 0 for remote drivers
+		driveDriverBits[drive] = CalcDriverBitmap(drive);			// this returns 0 for remote drivers
 		if (drive < MaxAxes)
 		{
 			axisDrivers[drive].numDrivers = 1;
@@ -1657,7 +1658,7 @@ void Platform::Spin()
 			// Check for attempts to move motors when not powered
 			if (warnDriversNotPowered)
 			{
-				Message(ErrorMessage, "Attempt to move motors when VIN is not in range");
+				Message(ErrorMessage, "Attempt to move motors when VIN is not in range\n");
 				warnDriversNotPowered = false;
 				reported = true;
 			}
