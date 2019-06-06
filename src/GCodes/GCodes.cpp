@@ -897,8 +897,11 @@ void GCodes::RunStateMachine(GCodeBuffer& gb, const StringRef& reply)
 		// no break
 
 	case GCodeState::stoppingWithHeatersOn:		// M0 H1 or M1 H1 after executing stop.g/sleep.g if present
-		platform.SetDriversIdle();
-		gb.SetState(GCodeState::normal);
+		if (LockMovementAndWaitForStandstill(gb))
+		{
+			platform.SetDriversIdle();
+			gb.SetState(GCodeState::normal);
+		}
 		break;
 
 	// States used for grid probing
@@ -2628,10 +2631,10 @@ const char* GCodes::DoStraightMove(GCodeBuffer& gb, bool isCoordinated)
 	{
 		moveBuffer.laserPwmOrIoBits = rp->laserPwmOrIoBits;
 	}
-#if SUPPORT_LASER
+# if SUPPORT_LASER
 	else if (machineType == MachineType::laser)
 	{
-		if (!isCoordinated || moveBuffer.moveType != 0)
+		if (!moveBuffer.isCoordinated || moveBuffer.moveType != 0)
 		{
 			moveBuffer.laserPwmOrIoBits.laserPwm = 0;
 		}
@@ -2648,8 +2651,8 @@ const char* GCodes::DoStraightMove(GCodeBuffer& gb, bool isCoordinated)
 			moveBuffer.laserPwmOrIoBits.laserPwm = 0;
 		}
 	}
-#endif
-#if SUPPORT_IOBITS
+# endif
+# if SUPPORT_IOBITS
 	else
 	{
 		// Update the iobits parameter
@@ -2662,7 +2665,7 @@ const char* GCodes::DoStraightMove(GCodeBuffer& gb, bool isCoordinated)
 			// Leave moveBuffer.ioBits alone so that we keep the previous value
 		}
 	}
-#endif
+# endif
 #endif
 
 	if (moveBuffer.moveType != 0)
@@ -2774,24 +2777,59 @@ const char* GCodes::DoStraightMove(GCodeBuffer& gb, bool isCoordinated)
 
 		ToolOffsetTransform(currentUserPosition, moveBuffer.coords, axesMentioned);
 																				// apply tool offset, baby stepping, Z hop and axis scaling
-		// If we are emulating Marlin for nanoDLP then we need to set a special end state
-		if (platform.Emulating() == Compatibility::nanoDLP && &gb == serialGCode && !DoingFileMacro())
-		{
-			gb.SetState(GCodeState::waitingForSpecialMoveToComplete);
-		}
-
 		AxesBitmap effectiveAxesHomed = axesHomed;
 		if (doingManualBedProbe)
 		{
 			ClearBit(effectiveAxesHomed, Z_AXIS);								// if doing a manual Z probe, don't limit the Z movement
 		}
-		if (moveBuffer.moveType == 0 && reprap.GetMove().GetKinematics().LimitPosition(moveBuffer.coords, moveBuffer.initialCoords, numVisibleAxes, effectiveAxesHomed, moveBuffer.isCoordinated, limitAxes))
+
+		if (moveBuffer.moveType == 0)
 		{
-			if (machineType != MachineType::fff)
+			const LimitPositionResult lp = reprap.GetMove().GetKinematics().LimitPosition(moveBuffer.coords, moveBuffer.initialCoords, numVisibleAxes, effectiveAxesHomed, moveBuffer.isCoordinated, limitAxes);
+			switch (lp)
 			{
-				return "G0/G1: outside machine limits";							// it's a laser or CNC, so this is a definite error
+			case LimitPositionResult::adjusted:
+			case LimitPositionResult::adjustedAndIntermediateUnreachable:
+				if (machineType != MachineType::fff)
+				{
+					return "G0/G1: target position outside machine limits";		// it's a laser or CNC so this is a definite error
+				}
+				ToolOffsetInverseTransform(moveBuffer.coords, currentUserPosition);	// make sure the limits are reflected in the user position
+				if (lp == LimitPositionResult::adjusted)
+				{
+					break;														// we can reach the intermediate positions, so nothing more to do
+				}
+				// no break
+
+			case LimitPositionResult::intermediateUnreachable:
+				if (   moveBuffer.isCoordinated
+					&& (   (machineType == MachineType::fff && !moveBuffer.hasExtrusion)
+#if SUPPORT_LASER || SUPPORT_IOBITS
+						|| (machineType == MachineType::laser && moveBuffer.laserPwmOrIoBits.laserPwm == 0)
+#endif
+					   )
+				   )
+				{
+					// It's a coordinated travel move on a 3D printer or laser cutter, so see whether an uncoordinated move will work
+					const LimitPositionResult lp2 = reprap.GetMove().GetKinematics().LimitPosition(moveBuffer.coords, moveBuffer.initialCoords, numVisibleAxes, effectiveAxesHomed, false, limitAxes);
+					if (lp2 == LimitPositionResult::ok)
+					{
+						moveBuffer.isCoordinated = false;						// change it to an uncoordinated move
+						break;
+					}
+				}
+				return "G0/G1: target position not reachable from current position";		// we can't bring the move within limits, so this is a definite error
+
+			case LimitPositionResult::ok:
+			default:
+				break;
 			}
-			ToolOffsetInverseTransform(moveBuffer.coords, currentUserPosition);	// make sure the limits are reflected in the user position
+		}
+
+		// If we are emulating Marlin for nanoDLP then we need to set a special end state
+		if (platform.Emulating() == Compatibility::nanoDLP && &gb == serialGCode && !DoingFileMacro())
+		{
+			gb.SetState(GCodeState::waitingForSpecialMoveToComplete);
 		}
 
 		// Flag whether we should use pressure advance, if there is any extrusion in this move.
@@ -2806,7 +2844,7 @@ const char* GCodes::DoStraightMove(GCodeBuffer& gb, bool isCoordinated)
 		// Apply segmentation if necessary. To speed up simulation on SCARA printers, we don't apply kinematics segmentation when simulating.
 		// Note for when we use RTOS: as soon as we set segmentsLeft nonzero, the Move process will assume that the move is ready to take, so this must be the last thing we do.
 		const Kinematics& kin = reprap.GetMove().GetKinematics();
-		if (kin.UseSegmentation() && simulationMode != 1 && (moveBuffer.hasExtrusion || isCoordinated || !kin.UseRawG0()))
+		if (kin.UseSegmentation() && simulationMode != 1 && (moveBuffer.hasExtrusion || moveBuffer.isCoordinated || !kin.UseRawG0()))
 		{
 			// This kinematics approximates linear motion by means of segmentation.
 			// We assume that the segments will be smaller than the mesh spacing.
@@ -2814,7 +2852,7 @@ const char* GCodes::DoStraightMove(GCodeBuffer& gb, bool isCoordinated)
 			const float moveTime = xyLength/moveBuffer.feedRate;			// this is a best-case time, often the move will take longer
 			totalSegments = (unsigned int)max<int>(1, min<int>(rintf(xyLength/kin.GetMinSegmentLength()), rintf(moveTime * kin.GetSegmentsPerSecond())));
 		}
-		else if (reprap.GetMove().IsUsingMesh() && (isCoordinated || machineType == MachineType::fff))
+		else if (reprap.GetMove().IsUsingMesh() && (moveBuffer.isCoordinated || machineType == MachineType::fff))
 		{
 			const HeightMap& heightMap = reprap.GetMove().AccessHeightMap();
 			totalSegments = max<unsigned int>(1, heightMap.GetMinimumSegments(currentUserPosition[X_AXIS] - initialX, currentUserPosition[Y_AXIS] - initialY));
@@ -2983,7 +3021,7 @@ const char* GCodes::DoArcMove(GCodeBuffer& gb, bool clockwise)
 
 	// Transform to machine coordinates and check that it is within limits
 	ToolOffsetTransform(currentUserPosition, moveBuffer.coords, axesMentioned);			// set the final position
-	if (reprap.GetMove().GetKinematics().LimitPosition(moveBuffer.coords, nullptr, numVisibleAxes, axesHomed, true, limitAxes))
+	if (reprap.GetMove().GetKinematics().LimitPosition(moveBuffer.coords, nullptr, numVisibleAxes, axesHomed, true, limitAxes) != LimitPositionResult::ok)
 	{
 		// Abandon the move
 		return "G2/G3: outside machine limits";
@@ -3195,7 +3233,7 @@ bool GCodes::ReadMove(RawMove& m)
 		}
 
 		// Limit the end position at each segment. This is needed for arc moves on any printer, and for [segmented] straight moves on SCARA printers.
-		if (reprap.GetMove().GetKinematics().LimitPosition(m.coords, nullptr, numVisibleAxes, axesHomed, true, limitAxes))
+		if (reprap.GetMove().GetKinematics().LimitPosition(m.coords, nullptr, numVisibleAxes, axesHomed, true, limitAxes) != LimitPositionResult::ok)
 		{
 			segMoveState = SegmentedMoveState::aborted;
 			doingArcMove = false;
