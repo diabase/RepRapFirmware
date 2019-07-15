@@ -1,6 +1,30 @@
 Summary of important changes in recent versions
 ===============================================
 
+Version 2.04RC1
+============
+Compatible files:
+- DuetWiFiServer 1.23
+- DuetWebControl 1.22.6 or 2.0.0-RC6 or 2.0.0-RC7
+
+Upgrade notes:
+- The P parameter of the G29 S0 (or plain G29) command has been withdrawn. See below under "changed behaviour".
+
+Feature improvements/changed behaviour:
+- The P parameter of the G29 S0 (or plain G29) command has been withdrawn, because it didn't work when deployprobe.g and retractprobe.g files were used and wasn't easy to fix without wasting memory. A new subfunction G29 S3 P"name.csv" has been added to facilitate saving the height map file under a different name. It behaves the same as M374 P"name.csv".
+- M118 now appends '\n' to the message text except when the destination is http
+- G31 with no parameters now reports the G31 parameters of the current Z probe as well as the current reading
+- Support for pulse-generating filament sensors has been improved for the case that the sensor produces a high number of pulses per mm of filament movement
+
+Bug fixes:
+- When auto delta calibration adjusted the delta radius and/or the diagonal rod length, it made an incorrect adjustment to the homed height
+- On a delta printer, if multiple rod lengths are specified in the M665 command and the first 3 rod lengths were not equal to each other, this resulted in incorrect motion
+- M557 with a P parameter but no XY or R parameters now reports an error
+- Attempts to jog axes 0.05mm beyond the limits set by M208 alternately succeeded/returned the axis to the limit
+
+Internal changes:
+- Changes for compatibility with latest versions of CoreNG and RRFLibraries projects
+
 Version 2.03
 ============
 Compatible files:
@@ -9,7 +33,7 @@ Compatible files:
 
 Upgrade notes:
 - Restore points (created by G60 and created automatically at the start of a pause or a tool change) now have their coordinates stored independently of any workplace offsets. So if you create a restore point and then change the workplace offsets, when you go back to the restore point it will go back to the same machine position regardless of the change in workplace offsets.
-- Tool changers, IDEX printers and similar using tpre#.g and tpost#.g files: tool offsets are now applied within the tpre#.g and tpost#.g macros.
+- Tool changers, IDEX printers and similar using tfree#.g and tpost#.g files: tool offsets are now applied within the tfree#.g and tpost#.g macros (but not in the tpre#.g file because no tool is selected at that point).
 - DueX2 and DueX5 users: if you have been experiencing high I2C error counts, then in the past this usually led to the machine printing very slowly when the errors started occurring. Changes to the I2C drivers should allow the machine to recover from the error in most cases. However, if it does not recover then the machine will most likely continue to run as normal, except that the states of endstops on the DueX will not be read correctly and commands to change settings of fans on the DueX won't work. So watch out for these different symptoms.
 - Duet Maestro users with a 12864 display may need to make minor changes to their menu files to correct for changes in spacing and automatic insertion of % characters after certain values e.g. fan speed
 - Laser mode: for safety, the G1 S parameter is no longer sticky by default. You can make it sticky by adding parameter S1 to the M452 command.
@@ -19,6 +43,7 @@ Upgrade notes:
 
 Known issues:
 - When auto delta calibration adjusts the delta radius and/or the diagonal rod length, it makes an incorrect adjustment to the homed height. This will be fixed in a forthcoming update. Meanwhile, run a second auto calibration cycle to correct the homed height.
+- On a delta printer, if multiple rod lengths are specified in the M665 command and the first 3 rod lengths are not equal to each other, this results in incorrect motion
 - M557 with a P parameter but no XY or R parameters should report an error, but doesn't
 - The P parameter of the G29 S0 command is ignored if there is a deployprobe.g file and/or a retractprobe.g file
 
