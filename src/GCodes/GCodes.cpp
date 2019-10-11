@@ -70,6 +70,7 @@ void GCodes::RawMove::SetDefaults(size_t firstDriveToZero)
 	isCoordinated = false;
 	usingStandardFeedrate = false;
 	usePressureAdvance = false;
+	hasExtrusion = false;
 	endStopsToCheck = 0;
 	filePos = noFilePosition;
 	xAxes = DefaultXAxisMapping;
@@ -560,14 +561,10 @@ void GCodes::RunStateMachine(GCodeBuffer& gb, const StringRef& reply)
 			{
 				if (gb.Seen(axisLetters[axis]))
 				{
-					for (size_t axs = 0; axs < numVisibleAxes; ++axs)
-					{
-						moveBuffer.coords[axs] = currentUserPosition[axs];
-					}
-					// Add R to the current position
-					moveBuffer.coords[axis] += rVal;
-
 					SetMoveBufferDefaults();
+					ToolOffsetTransform(currentUserPosition, moveBuffer.coords);
+					moveBuffer.coords[axis] += rVal;					// add R to the current position
+
 					moveBuffer.feedRate = findCenterOfCavityRestorePoint.feedRate;
 					moveBuffer.canPauseAfter = false;
 					moveBuffer.hasExtrusion = false;
@@ -597,19 +594,17 @@ void GCodes::RunStateMachine(GCodeBuffer& gb, const StringRef& reply)
 			{
 				if (gb.Seen(axisLetters[axis]))
 				{
-					for (size_t axs = 0; axs < numVisibleAxes; ++axs)
-					{
-						moveBuffer.coords[axs] = findCenterOfCavityRestorePoint.moveCoords[axs];
-					}
-					moveBuffer.coords[axis] += (currentUserPosition[axis] - findCenterOfCavityRestorePoint.moveCoords[axis]) / 2;
+					// Get the current position of the axis to calculate center-point below
+					float currentCoords[MaxTotalDrivers];
+					ToolOffsetTransform(currentUserPosition, currentCoords);
 
 					SetMoveBufferDefaults();
-					moveBuffer.feedRate = findCenterOfCavityRestorePoint.feedRate;
-					moveBuffer.hasExtrusion = false;
+					RestorePosition(findCenterOfCavityRestorePoint, &gb);
+					ToolOffsetTransform(currentUserPosition, moveBuffer.coords);
+					moveBuffer.coords[axis] += (currentCoords[axis] - moveBuffer.coords[axis]) / 2;
 
-					gb.SetState(GCodeState::waitingForSpecialMoveToComplete);
 					NewMoveAvailable(1);
-
+					gb.SetState(GCodeState::waitingForSpecialMoveToComplete);
 					break;
 				}
 			}
@@ -2222,6 +2217,16 @@ void GCodes::SaveResumeInfo(bool wasPowerFailure)
 			}
 			if (ok)
 			{
+				// The resurrect-prologue file may undo some retraction, so make sure we have the correct tool selected, but don't run tool change files
+				const Tool * const ct = reprap.GetCurrentTool();
+				if (ct != nullptr)
+				{
+					buf.printf("T%d P0\n", ct->Number());
+					ok = f->Write(buf.c_str());
+				}
+			}
+			if (ok)
+			{
 				buf.printf("M98 P\"%s\"\n", RESUME_PROLOGUE_G);				// call the prologue
 				ok = f->Write(buf.c_str());
 			}
@@ -2634,13 +2639,13 @@ const char* GCodes::DoStraightMove(GCodeBuffer& gb, bool isCoordinated)
 # if SUPPORT_LASER
 	else if (machineType == MachineType::laser)
 	{
-		if (!moveBuffer.isCoordinated || moveBuffer.moveType != 0)
-		{
-			moveBuffer.laserPwmOrIoBits.laserPwm = 0;
-		}
-		else if (gb.Seen('S'))
+		if (gb.Seen('S'))
 		{
 			moveBuffer.laserPwmOrIoBits.laserPwm = ConvertLaserPwm(gb.GetFValue());
+		}
+		else if (moveBuffer.moveType != 0)
+		{
+			moveBuffer.laserPwmOrIoBits.laserPwm = 0;
 		}
 		else if (laserPowerSticky)
 		{
@@ -4997,7 +5002,7 @@ GCodeResult GCodes::AdvanceHash(const StringRef &reply)
 			SHA1Result(&hash);
 			for(size_t i = 0; i < 5; i++)
 			{
-				reply.catf("%" PRIx32, hash.Message_Digest[i]);
+				reply.catf("%08" PRIx32, hash.Message_Digest[i]);
 			}
 
 			// Clean up again

@@ -1435,7 +1435,7 @@ void Platform::Spin()
 
 				// The driver often produces a transient open-load error, especially in stealthchop mode, so we require the condition to persist before we report it.
 				// Also, false open load indications persist when in standstill, if the phase has zero current in that position
-				if ((stat & TMC_RR_OLA) != 0 && motorCurrents[nextDriveToPoll] * motorCurrentFraction[nextDriveToPoll] >= MinimumOpenLoadMotorCurrent)
+				if ((stat & TMC_RR_OLA) != 0)
 				{
 					if (!openLoadATimer.IsRunning())
 					{
@@ -1453,7 +1453,7 @@ void Platform::Spin()
 					}
 				}
 
-				if ((stat & TMC_RR_OLB) != 0 && motorCurrents[nextDriveToPoll] * motorCurrentFraction[nextDriveToPoll] >= MinimumOpenLoadMotorCurrent)
+				if ((stat & TMC_RR_OLB) != 0)
 				{
 					if (!openLoadBTimer.IsRunning())
 					{
@@ -2278,7 +2278,7 @@ void Platform::Diagnostics(MessageType mtype)
 	}
 
 	// Show the current error codes
-	MessageF(mtype, "Error status: %" PRIu32 "\n", errorCodeBits);
+	MessageF(mtype, "Error status: %" PRIx32 "\n", errorCodeBits);
 
 	// Show the number of free entries in the file table
 	MessageF(mtype, "Free file entries: %u\n", massStorage->GetNumFreeFiles());
@@ -2625,11 +2625,11 @@ GCodeResult Platform::DiagnosticTest(GCodeBuffer& gb, const StringRef& reply, in
 
 	case (int)DiagnosticTestType::PrintObjectSizes:
 		reply.printf(
-				"DDA %u, DM %u, Tool %u"
+				"DDA %u, DM %u, Tool %u, GCodeBuffer %u, heater %u"
 #if HAS_NETWORKING && !HAS_LEGACY_NETWORKING
 				", HTTP resp %u, FTP resp %u, Telnet resp %u"
 #endif
-				, sizeof(DDA), sizeof(DriveMovement), sizeof(Tool)
+				, sizeof(DDA), sizeof(DriveMovement), sizeof(Tool), sizeof(GCodeBuffer), sizeof(PID)
 #if HAS_NETWORKING && !HAS_LEGACY_NETWORKING
 				, sizeof(HttpResponder), sizeof(FtpResponder), sizeof(TelnetResponder)
 #endif

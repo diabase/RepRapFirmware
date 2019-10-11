@@ -381,14 +381,20 @@ bool DDA::InitStandardMove(DDARing& ring, GCodes::RawMove &nextMove, bool doMoto
 	flags.hadLookaheadUnderrun = false;
 	flags.isLeadscrewAdjustmentMove = false;
 	flags.goingSlow = false;
-	flags.controlLaser = true;
 
 	// The end coordinates will be valid at the end of this move if it does not involve endstop checks and is not a raw motor move
 	flags.endCoordinatesValid = (endStopsToCheck == 0) && doMotorMapping;
 	flags.continuousRotationShortcut = (nextMove.moveType == 0);
 
-#if SUPPORT_IOBITS
-	laserPwmOrIoBits = nextMove.laserPwmOrIoBits;
+#if SUPPORT_LASER || SUPPORT_IOBITS
+	if (nextMove.isCoordinated && endStopsToCheck == 0)
+	{
+		laserPwmOrIoBits = nextMove.laserPwmOrIoBits;
+	}
+	else
+	{
+		laserPwmOrIoBits.Clear();
+	}
 #endif
 
 	// If it's a Z probing move, limit the Z acceleration to better handle nozzle-contact probes
@@ -521,7 +527,6 @@ bool DDA::InitLeadscrewMove(DDARing& ring, float feedrate, const float adjustmen
 	flags.isDeltaMovement = false;
 	flags.isPrintingMove = false;
 	flags.xyMoving = false;
-	flags.controlLaser = false;
 	flags.canPauseAfter = true;
 	flags.usingStandardFeedrate = false;
 	flags.usePressureAdvance = false;
@@ -1678,7 +1683,7 @@ pre(state == frozen)
 
 #if SUPPORT_LASER
 	// Deal with laser power
-	if (reprap.GetGCodes().GetMachineType() == MachineType::laser && flags.controlLaser)
+	if (reprap.GetGCodes().GetMachineType() == MachineType::laser)
 	{
 		// Ideally we should ramp up the laser power as the machine accelerates, but for now we don't.
 		p.SetLaserPwm(laserPwmOrIoBits.laserPwm);
