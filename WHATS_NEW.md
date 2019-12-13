@@ -1,74 +1,76 @@
 Summary of important changes in recent versions
 ===============================================
 
-Version 2.04RC4
-===============
+Version 2.05
+============
 Compatible files:
 - DuetWiFiServer 1.23
-- DuetWebControl 2.0.2 (recommended) or 1.22.6
+- DuetWebControl 2.0.4 (recommended) or 1.22.6
 
-Upgrade notes:
-- If you are using a simple microswitch as a filament monitor, you may need to add a pullup resistor (see below)
-- See upgrade notes for 2.03
+Upgrade notes from version 2.04:
+- If using this release to control a laser cutter or laser engraver, see "Changed behaviour" below.
 
-Feature improvements/changed behaviour:
-- File uploads are now done to temporary files that are renamed when the upload succeeds; so that if an upload fails, an original file with the same name is not lost
-- HTTP reply buffers now time out 8 seconds after they are allocated. This may resolve the out-of-buffer issues that some users experience.
-- In the resurrect.g file, the current tool is now selected (without running tool change files) before resurrect-prologue is called, so that resurrect-prologue can do extrusion commands after first doing M116 to wait for temperatures. After running resurrect-prologue.g the tool is deselected (without running tfree#.g), then reselected this time running tpre#.g and tpost#.g.
-- Pullup resistors are no longer enabled on endstop inputs used to connect filament monitors when they are configured using M591. This is to increase noise immunity when running Duet3D or other active filament monitors. If you are using a simple microswitch connected between STP and GND of an endstop input, you may need to add an external pullup resistor between STP and +3.3V.
-- The new status information provided by Duet3D magnetic filament monitors with version 3 firmware are now supported
-- Estimated print time and filament usage comments written by KISSLicer 2 alpha are recognised
+Changed behaviour:
+- In laser mode (M453), M3 never turns on the laser immediately. Instead it sets the default laser power for following G1/G2/G3 commands. Likewise, M5 does not immediately turn off the laser, it sets the default laser power for following G1/G2/G3 commands. If a subsequent G1 command has a S parameter, the value of that parameter becomes the default laser power for that command and subsequent G1/G2/G3 commands.
+- Current position is no longer shown for pulse-type filament monitors, because it was meaningless and nearly always zero
+- Calibration data for pulse-type filament monitors is no longer displayed by M122 (same as for laser and magnetic filament monitors). Use M591 to report the calibration data.
+- The rr_config HTTP response and M408 S5 response now include new field "sysdir" which gives the system files directory set by M505. This will allow future versions of Duet Web Control to fetch the height map from the correct folder after running G29.
 
 Bug fixes:
-- Fixed glitches on some I/O lines (introduced in 2.04RC3) that affected BLTouch control
-- Fixed G30 commands when the M208 minimum Z position is much less than zero
-- Attempts to use file paths that are too long to store internally are now handled better
+- In laser mode, M3 and M5 commands used in a job gave unpredictable results
+- If a print that was sliced using absolute extrusion mode was resurrected, unwanted extrusion occurred just before the print was resumed
+- Bed compensation did not take account of the XY offset of the printing nozzle from the head reference point
+- When using SCARA kinematics the calculation of the minimum achievable radius was incorrect. Depending on the B parameter of the M667 command, this could result in spurious "Intermediate position unreachable" errors, or non-extruding G1 moves being turned into G0 moves.
+- A badly-formed GCode file that returned the layer height or object height as nan or inf caused DWC to disconnect because of a JSON parse failure
+- M579 scale factors were not applied correctly to G2 and G3 arc moves
+- Spurious newlines were sometimes sent to USB and other output channels when commands such as M106 were deferred to execute in step with movement commands, or when commands were executed in response to triggers
+- Messages sent to USB and Telnet output channels did not always time out when the channel became unavailable for writing
+- Added check for W5500 reporting received data too big to fit in a single buffer
 
-Version 2.04RC3
-===============
+Version 2.04
+============
 Compatible files:
 - DuetWiFiServer 1.23
-- DuetWebControl 2.0.2 (recommended) or 1.22.6
+- DuetWebControl 2.0.4 (recommended) or 1.22.6
 
 Upgrade notes:
 - If using this release to control a laser cutter/engraver, see the notes below on changed handling of the G1 S parameter
-
-Feature improvements/changed behaviour:
-- mDNS is now supported on the Duet Ethernet and Duet Maestro
-- In Laser mode, if sticky laser power mode is selected, the power set by the S parameter in a G1 command is remembered across G0 moves to the next G1 move
-- CRC checking of uploaded file data is now supported (requires DWC 2.0.1)
-- When an error occurs reading or writing SD card data, the number of retries is increased to 5 and the delay between retries increases with each retry
-- Increased minimum motor current for open load warnings from 300 to 500mA
-- When writing the resurrect.g file, select the active tool before calling resurrect-prologue.g. This is to allow extrusion to be done in resurrect-prologue.g.
-
-Bug fixes:
-- M675 did not take workplace coordinate offsets into account
-- Duet WiFi/Ethernet + DueX configurations did not start up if noise was present on the DueX endstop or GPIO inputs
-- The SHA1 has reported by M38 sometimes had one or more zero digits missing
-
-Version 2.04RC1
-===============
-Compatible files:
-- DuetWiFiServer 1.23
-- DuetWebControl 1.22.6 or 2.0.0-RC6 or 2.0.0-RC7
-
-Upgrade notes:
+- If you are using a simple microswitch as a filament monitor, you may need to add a pullup resistor (see below)
 - The P parameter of the G29 S0 (or plain G29) command has been withdrawn. See below under "changed behaviour".
 
+Known issues:
+- (present in older releases too) Resurrecting a print causes excessive extrusion at the start if the print was sliced using absolute extrusion. Workaround: slice prints using relative extrusion. If you need to resurrect a print that has been sliced using absolute extrusion, then edit the resurrect.g file to move the G92 E command later in the file, after the M23 and M26 commands.
+
 Feature improvements/changed behaviour:
+- File uploads are now done to temporary files that are renamed when the upload succeeds; so that if an upload fails, an original file with the same name is not lost (thanks wilriker)
+- HTTP reply buffers now time out 8 seconds after they are allocated. This may resolve the out-of-buffer issues that some users experience.
+- In the resurrect.g file, the current tool is now selected (without running tool change files) before resurrect-prologue is called, so that resurrect-prologue can do extrusion commands after first doing M116 to wait for temperatures. After running resurrect-prologue.g, the tool is deselected (without running tfree#.g), then reselected this time running tpre#.g and tpost#.g.
+- Pullup resistors are no longer enabled on endstop inputs used to connect filament monitors when they are configured using M591. This is to increase noise immunity when running Duet3D or other active filament monitors. If you are using a simple microswitch connected between STP and GND of an endstop input, you might need to add an external pullup resistor between STP and +3.3V, especially when using the endstop inputs on the CONN_LCD connector.
+- The new status information provided by Duet3D magnetic filament monitors with version 3 firmware is now supported
+- Estimated print time and filament usage comments written by KISSLicer 2 alpha are recognised
+- mDNS is now supported on the Duet Ethernet and Duet Maestro
+- In Laser mode, if sticky laser power mode is selected, the power set by the S parameter in a G1 command is remembered across G0 moves to the next G1 move
+- CRC checking of uploaded file data is now supported (requires DWC 2.0.4)
+- When an error occurs reading or writing SD card data, the number of retries is increased to 5 and the delay between retries increases with each retry
+- Increased minimum motor current for open load warnings from 300 to 500mA
+- When writing the resurrect.g file, the active tool is selected before calling resurrect-prologue.g. This is to allow extrusion to be done in resurrect-prologue.g.
 - The P parameter of the G29 S0 (or plain G29) command has been withdrawn, because it didn't work when deployprobe.g and retractprobe.g files were used and wasn't easy to fix without wasting memory. A new subfunction G29 S3 P"name.csv" has been added to facilitate saving the height map file under a different name. It behaves the same as M374 P"name.csv".
 - M118 now appends '\n' to the message text except when the destination is http
 - G31 with no parameters now reports the G31 parameters of the current Z probe as well as the current reading
 - Support for pulse-generating filament sensors has been improved for the case that the sensor produces a high number of pulses per mm of filament movement
+- The M115 P parameter is now only supported in firmware builds that support more than one board variant, and only from within config.g during startup
+- If the SD card annote be mounted because no FAT filesystem was found, an explicit error messsge to this effect is provided instead of an error code
 
 Bug fixes:
+- Fixed G30 commands when the M208 minimum Z position is much less than zero
+- Attempts to use file paths that are too long to store internally are now handled better
+- M675 did not take workplace coordinate offsets into account
+- Duet WiFi/Ethernet + DueX configurations did not start up if noise was present on the DueX endstop or GPIO inputs
+- The SHA1 hash reported by M38 sometimes had one or more zero digits missing
 - When auto delta calibration adjusted the delta radius and/or the diagonal rod length, it made an incorrect adjustment to the homed height
-- On a delta printer, if multiple rod lengths are specified in the M665 command and the first 3 rod lengths were not equal to each other, this resulted in incorrect motion
+- On a delta printer, if multiple rod lengths were specified in the M665 command and the first 3 rod lengths were not equal to each other, this resulted in incorrect motion
 - M557 with a P parameter but no XY or R parameters now reports an error
 - Attempts to jog axes 0.05mm beyond the limits set by M208 alternately succeeded/returned the axis to the limit
-
-Internal changes:
-- Changes for compatibility with latest versions of CoreNG and RRFLibraries projects
 
 Version 2.03
 ============

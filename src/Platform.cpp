@@ -36,6 +36,7 @@
 #include "Logger.h"
 #include "Tasks.h"
 #include "Hardware/DmacManager.h"
+#include "Hardware/Cache.h"
 #include "Math/Isqrt.h"
 #include "Hardware/I2C.h"
 
@@ -260,11 +261,11 @@ void Platform::Init()
 	// Read the unique ID of the MCU
 	memset(uniqueId, 0, sizeof(uniqueId));
 
-	DisableCache();
+	Cache::Disable();
 	cpu_irq_disable();
 	const uint32_t rc = flash_read_unique_id(uniqueId, 4);
 	cpu_irq_enable();
-	EnableCache();
+	Cache::Enable();
 
 	if (rc == 0)
 	{
@@ -953,7 +954,7 @@ void Platform::UpdateFirmware()
 	reprap.EmergencyStop();
 
 	// Step 0 - disable the cache because it seems to interfere with flash memory access
-	DisableCache();
+	Cache::Disable();
 
 	// Step 1 - Write update binary to Flash and overwrite the remaining space with zeros
 	// On the SAM3X, leave the last 1KB of Flash memory untouched, so we can reuse the NvData after this update
@@ -1306,31 +1307,32 @@ bool Platform::FlushMessages()
 	{
 		MutexLocker lock(usbMutex);
 		OutputBuffer *usbOutputBuffer = usbOutput.GetFirstItem();
-		if (usbOutputBuffer != nullptr)
+		if (usbOutputBuffer == nullptr)
 		{
-			if (!SERIAL_MAIN_DEVICE)
+			(void) usbOutput.Pop();
+		}
+		else if (!SERIAL_MAIN_DEVICE.IsConnected())
+		{
+			// If the USB port is not opened, free the data left for writing
+			OutputBuffer::ReleaseAll(usbOutputBuffer);
+			(void) usbOutput.Pop();
+		}
+		else
+		{
+			// Write as much data as we can...
+			const size_t bytesToWrite = min<size_t>(SERIAL_MAIN_DEVICE.canWrite(), usbOutputBuffer->BytesLeft());
+			if (bytesToWrite > 0)
 			{
-				// If the USB port is not opened, free the data left for writing
-				OutputBuffer::ReleaseAll(usbOutputBuffer);
-				(void) usbOutput.Pop();
+				SERIAL_MAIN_DEVICE.write(usbOutputBuffer->Read(bytesToWrite), bytesToWrite);
+			}
+
+			if (usbOutputBuffer->BytesLeft() == 0)
+			{
+				usbOutput.ReleaseFirstItem();
 			}
 			else
 			{
-				// Write as much data as we can...
-				const size_t bytesToWrite = min<size_t>(SERIAL_MAIN_DEVICE.canWrite(), usbOutputBuffer->BytesLeft());
-				if (bytesToWrite > 0)
-				{
-					SERIAL_MAIN_DEVICE.write(usbOutputBuffer->Read(bytesToWrite), bytesToWrite);
-				}
-
-				if (usbOutputBuffer->BytesLeft() == 0)
-				{
-					usbOutput.ReleaseFirstItem();
-				}
-				else
-				{
-					usbOutput.ApplyTimeout(SERIAL_MAIN_TIMEOUT);
-				}
+				usbOutput.ApplyTimeout(SERIAL_MAIN_TIMEOUT);
 			}
 		}
 		usbHasMore = !usbOutput.IsEmpty();
@@ -1620,7 +1622,7 @@ void Platform::Spin()
 				ListDrivers(scratchString.GetRef(), stalledDriversToLog);
 				stalledDriversToLog = 0;
 				float liveCoordinates[MaxTotalDrivers];
-				reprap.GetMove().LiveCoordinates(liveCoordinates, reprap.GetCurrentXAxes(), reprap.GetCurrentYAxes());
+				reprap.GetMove().LiveCoordinates(liveCoordinates, reprap.GetCurrentTool());
 				MessageF(WarningMessage, "Driver(s)%s stalled at Z height %.2f", scratchString.c_str(), (double)liveCoordinates[Z_AXIS]);
 				reported = true;
 			}
@@ -1853,7 +1855,7 @@ void Platform::SoftwareReset(uint16_t reason, const uint32_t *stk)
 	rswdt_restart(RSWDT);						// kick the secondary watchdog
 #endif
 
-	DisableCache();								// disable the cache, it seems to upset flash memory access
+	Cache::Disable();							// disable the cache, it seems to upset flash memory access
 
 	if (reason == (uint16_t)SoftwareResetReason::erase)
 	{
@@ -2152,7 +2154,7 @@ void Platform::Diagnostics(MessageType mtype)
 {
 #if USE_CACHE
 	// Get the cache statistics before we start messing around with the cache
-	const uint32_t cacheCount = cmcc_get_monitor_cnt(CMCC);
+	const uint32_t cacheCount = Cache::GetHitCount();
 #endif
 
 	Message(mtype, "=== Platform ===\n");
@@ -2202,9 +2204,9 @@ void Platform::Diagnostics(MessageType mtype)
 		// Work around bug in ASF flash library: flash_read_user_signature calls a RAMFUNC without disabling interrupts first.
 		// This caused a crash (watchdog timeout) sometimes if we run M122 while a print is in progress
 		const irqflags_t flags = cpu_irq_save();
-		DisableCache();
+		Cache::Disable();
 		const uint32_t rc = flash_read_user_signature(reinterpret_cast<uint32_t*>(srdBuf), sizeof(srdBuf)/sizeof(uint32_t));
-		EnableCache();
+		Cache::Enable();
 		cpu_irq_restore(flags);
 
 		if (rc == FLASH_RC_OK)
@@ -3682,7 +3684,7 @@ void Platform::RawMessage(MessageType type, const char *message)
 		MutexLocker lock(usbMutex);
 		const char *p = message;
 		size_t len = strlen(p);
-		while (SERIAL_MAIN_DEVICE && len != 0 && !reprap.SpinTimeoutImminent())
+		while (SERIAL_MAIN_DEVICE.IsConnected() && len != 0 && !reprap.SpinTimeoutImminent())
 		{
 			const size_t written = SERIAL_MAIN_DEVICE.write(p, len);
 			len -= written;
@@ -3702,16 +3704,19 @@ void Platform::RawMessage(MessageType type, const char *message)
 			OutputBuffer *usbOutputBuffer = usbOutput.GetLastItem();
 			if (usbOutputBuffer == nullptr || usbOutputBuffer->IsReferenced())
 			{
-				if (!OutputBuffer::Allocate(usbOutputBuffer))
+				if (OutputBuffer::Allocate(usbOutputBuffer))
 				{
-					// Should never happen
-					return;
+					if (usbOutput.Push(usbOutputBuffer))
+					{
+						usbOutputBuffer->cat(message);
+					}
+					// else the message buffer has been released, so discard the message
 				}
-				usbOutput.Push(usbOutputBuffer);
 			}
-
-			// Append the message string
-			usbOutputBuffer->cat(message);
+			else
+			{
+				usbOutputBuffer->cat(message);		// append the message
+			}
 		}
 	}
 }
@@ -3788,7 +3793,7 @@ void Platform::Message(const MessageType type, OutputBuffer *buffer)
 		if ((type & (UsbMessage | BlockingUsbMessage)) != 0)
 		{
 			MutexLocker lock(usbMutex);
-			if (   !SERIAL_MAIN_DEVICE
+			if (   !SERIAL_MAIN_DEVICE.IsConnected()
 #if SUPPORT_SCANNER
 				|| (reprap.GetScanner().IsRegistered() && !reprap.GetScanner().DoingGCodes())
 #endif

@@ -430,15 +430,11 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, const StringRef& reply)
 				}
 				break;
 
-			case MachineType::laser:
-				{
-					const Pwm_t laserPwm = ConvertLaserPwm(gb.GetFValue());
-					platform.SetLaserPwm(laserPwm);
 #if SUPPORT_LASER
-					moveBuffer.laserPwmOrIoBits.laserPwm = laserPwm;
-#endif
-				}
+			case MachineType::laser:
+				moveBuffer.laserPwmOrIoBits.laserPwm = ConvertLaserPwm(gb.GetFValue());
 				break;
+#endif
 
 			default:
 #if SUPPORT_ROLAND
@@ -508,12 +504,11 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, const StringRef& reply)
 			}
 			break;
 
-		case MachineType::laser:
-			platform.SetLaserPwm(0);
 #if SUPPORT_LASER
+		case MachineType::laser:
 			moveBuffer.laserPwmOrIoBits.Clear();
-#endif
 			break;
+#endif
 
 		default:
 #if SUPPORT_ROLAND
@@ -795,7 +790,7 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, const StringRef& reply)
 						// We need to copy the absolute/relative and volumetric extrusion flags over
 						fileGCode->OriginalMachineState().CopyStateFrom(gb.MachineState());
 						fileToPrint.Seek(fileOffsetToPrint);
-						moveFractionToSkip = moveFractionToStartAt;
+						moveFractionToSkip = restartMoveFractionDone;
 					}
 					StartPrinting(fromStart);
 				}
@@ -869,10 +864,9 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, const StringRef& reply)
 		if (gb.Seen('S'))
 		{
 			fileOffsetToPrint = (FilePosition)gb.GetUIValue();
-			if (gb.Seen('P'))
-			{
-				moveFractionToStartAt = constrain<float>(gb.GetFValue(), 0.0, 1.0);
-			}
+			restartMoveFractionDone = (gb.Seen('P')) ? constrain<float>(gb.GetFValue(), 0.0, 1.0) : 0.0;
+			restartInitialUserX = (gb.Seen('X')) ? gb.GetFValue() : 0.0;
+			restartInitialUserY = (gb.Seen('Y')) ? gb.GetFValue() : 0.0;
 		}
 		break;
 
@@ -1448,11 +1442,21 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, const StringRef& reply)
 		break;
 
 	case 115: // Print firmware version or set hardware type
+#if defined(DUET_NG) || defined(DUET_06_085)
 		if (gb.Seen('P'))
 		{
-			platform.SetBoardType((BoardType)gb.GetIValue());
+			if (runningConfigFile)
+			{
+				platform.SetBoardType((BoardType)gb.GetIValue());
+			}
+			else
+			{
+				reply.copy("Board type can only be set within config.g");
+				result = GCodeResult::error;
+			}
 		}
 		else
+#endif
 		{
 			reply.printf("FIRMWARE_NAME: %s FIRMWARE_VERSION: %s ELECTRONICS: %s", FIRMWARE_NAME, VERSION, platform.GetElectronicsString());
 #ifdef DUET_NG

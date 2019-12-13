@@ -361,14 +361,14 @@ GCodeResult GCodes::DefineGrid(GCodeBuffer& gb, const StringRef &reply)
 
 	if (seenX != seenY)
 	{
-		reply.copy("specify both or neither of X and Y in M577");
+		reply.copy("specify both or neither of X and Y in M557");
 		return GCodeResult::error;
 	}
 
 	if (!seenX && !seenR)
 	{
 		// Must have given just the S or P parameter
-		reply.copy("specify at least radius or X and Y ranges in M577");
+		reply.copy("specify at least radius or X and Y ranges in M557");
 		return GCodeResult::error;
 	}
 
@@ -854,8 +854,10 @@ GCodeResult GCodes::ProbeTool(GCodeBuffer& gb, const StringRef& reply)
 			SavePosition(toolChangeRestorePoint, gb);
 
 			// Prepare another move similar to G1 .. S3
+			moveBuffer.SetDefaults(numVisibleAxes);
 			moveBuffer.moveType = 3;
-			axesToSenseLength = 0;
+			moveBuffer.canPauseAfter = false;
+
 			if (endStopToUse < 0)
 			{
 				moveBuffer.endStopsToCheck = 0;
@@ -876,11 +878,6 @@ GCodeResult GCodes::ProbeTool(GCodeBuffer& gb, const StringRef& reply)
 					moveBuffer.endStopsToCheck |= ActiveLowEndstop;
 				}
 			}
-			moveBuffer.xAxes = DefaultXAxisMapping;
-			moveBuffer.yAxes = DefaultYAxisMapping;
-			moveBuffer.usePressureAdvance = false;
-			moveBuffer.filePos = noFilePosition;
-			moveBuffer.canPauseAfter = false;
 
 			// Decide which way and how far to go
 			if (gb.Seen('R'))
