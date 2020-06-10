@@ -38,7 +38,7 @@ public:
 	static DhtSensorHardwareInterface *Create(unsigned int relativeChannel);
 	static TemperatureError GetTemperatureOrHumidity(unsigned int relativeChannel, float& t, bool wantHumidity);
 	static void InitStatic();
-	static void SensorTask();
+	[[noreturn]] static void SensorTask();
 
 private:
 	DhtSensorHardwareInterface(Pin p_pin);
