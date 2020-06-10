@@ -1,14 +1,29 @@
 Summary of important changes in recent versions
 ===============================================
 
+Version 2.05.1
+==============
+Compatible files:
+- DuetWiFiServer 1.23
+- DuetWebControl 2.0.7 or 1.22.6
+
+Bug fixes:
+- On delta printers, M564 S0 did not allow you to exceed the M665 print radius parameter
+- Fixed a 1-character buffer overflow in class OutputBuffer. The effects of this overflow were unknown but potentially severe.
+- On tool changers, if the different tools did not have equal XY offsets then G1 X moves in the tpre and tpost tool change files might perform uncommanded Y movement, and vice versa
+
 Version 2.05
 ============
 Compatible files:
 - DuetWiFiServer 1.23
-- DuetWebControl 2.0.4 (recommended) or 1.22.6
+- DuetWebControl 2.0.4 or 1.22.6
 
 Upgrade notes from version 2.04:
 - If using this release to control a laser cutter or laser engraver, see "Changed behaviour" below.
+
+Known issues:
+- On delta printers, M564 S0 does not allow you to exceed the M665 print radius parameter
+- On tool changers, if the different tools do not have equal XY offsets then G1 X moves in the tpre and tpost tool change files might perform uncommanded Y movement, and vice versa. Workaround: insert command M400 at the start of each tpre and tpost file.
 
 Changed behaviour:
 - In laser mode (M453), M3 never turns on the laser immediately. Instead it sets the default laser power for following G1/G2/G3 commands. Likewise, M5 does not immediately turn off the laser, it sets the default laser power for following G1/G2/G3 commands. If a subsequent G1 command has a S parameter, the value of that parameter becomes the default laser power for that command and subsequent G1/G2/G3 commands.
@@ -31,7 +46,7 @@ Version 2.04
 ============
 Compatible files:
 - DuetWiFiServer 1.23
-- DuetWebControl 2.0.4 (recommended) or 1.22.6
+- DuetWebControl 2.0.4 or 1.22.6
 
 Upgrade notes:
 - If using this release to control a laser cutter/engraver, see the notes below on changed handling of the G1 S parameter
